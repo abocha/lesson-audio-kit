@@ -1,0 +1,4 @@
+openai>=1.23
+gradio>=5.29
+gradio_client
+httpx

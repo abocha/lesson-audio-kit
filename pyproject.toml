@@ -1,0 +1,63 @@
+[tool.poetry]
+name = "lesson-audio-kit"
+version = "0.1.0"
+description = "A modular app for generating educational lesson content and converting it into audio using TTS."
+authors = ["Andrei <abocha.true@gmail.com>"]
+license = "MIT"
+readme = "README.md"
+packages = [
+    # Optional: Define if you intend to build these as explicit packages
+    # { include = "dialogue_tts_core" },
+    # { include = "gradio_frontend" },
+]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+openai = "^1.79.0"
+gradio = "^5.30.0"
+gradio-client = ">=1.10.1,<2.0.0"
+httpx = "^0.28.1"
+python-dotenv = "^1.1.0"
+requests = "^2.32.3"
+pydub = "^0.25.1"
+uvicorn = "^0.34.2"
+fastapi = "^0.115.12"
+streamlit = "^1.45.1"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.2.0"
+pytest-vcr = "^1.0.2"
+ruff = "^0.5.5"
+black = "^24.4.2"
+pre-commit = "^3.8.0"
+
+[build-system]
+requires = ["poetry-core>=1.9.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "F", "I", "UP", "C90", "N", "ANN", "BLE", "B", "A",
+    "COM", "DTZ", "EXE", "ISC", "ICN", "G", "PIE", "T20", "PYI",
+    "Q", "RET", "SLF", "SIM", "TID", "TCH", "ARG", "RUF",
+]
+ignore = [
+    "D100", "D101", "D102", "D103", "D104", "D105", "D106", "D107",
+    "D203", "D212", "D415", "ANN101", "ANN102", "ANN401", "COM812",
+    "ISC001", "T201", "S101", "FIX002", "PLR2004", "TD002", "TD003",
+    # "E501", # Line length handled by formatter
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["dialogue_tts_core", "gradio_frontend", "streamlit_frontend"]
+force-sort-within-sections = true
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+# preview = true # Optional: if you want to opt-into unstable formatting features
