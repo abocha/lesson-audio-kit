@@ -336,7 +336,7 @@ def handle_load_refresh_per_speaker_ui_trigger(
 
 def handle_tts_model_change(
     selected_model: str, current_speaker_configs: dict
-) -> tuple[gr.update, gr.update, dict]:
+) -> tuple[dict, dict, dict]:
     print(f"DEBUG (TTS Model Change): Model: {selected_model}, ")
     keys_str_tts_change = (
         str(list(current_speaker_configs.keys()))
@@ -373,7 +373,7 @@ def handle_tts_model_change(
 
 def handle_speaker_config_method_visibility_change(
     method: str,
-) -> tuple[gr.update, gr.update]:
+) -> tuple[dict, dict]:
     print(f"DEBUG (Config Method Change): Method: {method}")
     is_single_voice_visible = method == "Single Voice (Global)"
     is_detailed_per_speaker_container_visible = (

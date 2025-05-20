@@ -99,7 +99,7 @@ def _make_silent_mp3(duration_ms: int, template_mp3: str) -> str:
             "-f",
             "lavfi",
             "-i",
-            f"anullsrc=r={sr}:cl=mono",
+            f"anullsrc=r={sr}:cl={'stereo' if ch == '2' else 'mono'}",
             "-t",
             str(duration_ms / 1000),
             "-ac",
