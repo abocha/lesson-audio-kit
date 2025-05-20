@@ -85,6 +85,11 @@ async def is_content_safe(text: str, api_url_template: str | None) -> bool:
         return True  # Fail open (assume safe) on other unexpected errors
 
 
+async def maybe_await(obj: Any) -> Any:
+    """Awaits the object if it's a coroutine, otherwise returns it directly."""
+    return await obj if asyncio.iscoroutine(obj) else obj
+
+
 async def synthesize_speech_line(  # noqa: C901
     client: AsyncOpenAI,
     text: str,
@@ -151,10 +156,15 @@ async def synthesize_speech_line(  # noqa: C901
                 #     f"{request_params.get('speed', 1.0)}, 'has_instructions': "
                 #     f"{bool(request_params.get('instructions'))}}}"
                 # )
-                response = await client.audio.speech.create(**request_params)
+                # 1. Call the OpenAI method ─ it might return a coroutine or the
+                #    final object directly (e.g. when tests stub it with
+                #    AsyncMock).  Await only if necessary.
+                response_or_coro = client.audio.speech.create(**request_params)
+                response = await maybe_await(response_or_coro)
 
-                # Stream response to file
-                await response.astream_to_file(output_path)
+                # 2. Same trick for the stream-to-file helper.
+                to_file = response.astream_to_file(output_path)
+                await maybe_await(to_file)
 
                 # Verify file was created and has content
                 if os.path.exists(output_path) and os.path.getsize(output_path) > 0:

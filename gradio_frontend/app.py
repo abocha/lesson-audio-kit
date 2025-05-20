@@ -58,7 +58,7 @@ else:
 
 
 # --- Main Blocks UI Definition ---
-with gr.Blocks(theme=gr.themes.Soft(), elem_id="main_blocks_ui") as demo:
+with gr.Blocks(theme=gr.themes.Soft(), elem_id="main_blocks_ui") as demo:  # type: ignore
     gr.Markdown("# Dialogue Script to Speech (OpenAI TTS)")
     if not OPENAI_API_KEY or not async_openai_client:
         gr.Markdown(
