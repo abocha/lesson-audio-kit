@@ -57,6 +57,11 @@ ignore = [
 known-first-party = ["dialogue_tts_core", "gradio_frontend", "streamlit_frontend"]
 force-sort-within-sections = true
 
+[tool.pytest.ini_options]
+filterwarnings = [
+    "ignore::DeprecationWarning:websockets.legacy.*",
+]
+
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
