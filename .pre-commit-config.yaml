@@ -8,9 +8,9 @@ repos:
       - id: check-added-large-files
       - id: check-toml
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.5.5 # Latest stable ruff hook version
+    rev: v0.9.3 # Latest stable ruff hook version
     hooks:
       - id: ruff
         args: [--fix, --exit-non-zero-on-fix]
-      # - id: ruff-format # Usually not needed if `ruff --fix` handles formatting
+      - id: ruff-format # Usually not needed if `ruff --fix` handles formatting
       #   args: [--check]
