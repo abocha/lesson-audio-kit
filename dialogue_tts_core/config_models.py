@@ -1,73 +1,25 @@
 # dialogue_tts_core/config_models.py
 
 from typing import Final, Literal, Optional, Union
+import warnings  # For warning if context is missing
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationInfo, model_validator
+
+from dialogue_tts_core.tts_client import OPENAI_VOICES
+from gradio_frontend.ui_layout import VIBE_CHOICES
 
 # Define available OpenAI voices using Literal for validation
-# TODO: In a future refactor, this list should be sourced from
-# dialogue_tts_core.tts_client.OPENAI_VOICES
-# For now, use the direct definition.
-OPENAI_VOICES_TUPLE: Final = (
-    "alloy",
-    "ash",
-    "ballad",
-    "coral",
-    "echo",
-    "fable",
-    "onyx",
-    "sage",
-    "nova",
-    "shimmer",
-    "verse",
-)  # This should be a tuple for Literal
+# Sourced from dialogue_tts_core.tts_client.OPENAI_VOICES
+OPENAI_VOICES_TUPLE: Final = tuple(OPENAI_VOICES)
 
 # Define available Vibe choices
-# TODO: In a future refactor, consider sourcing from or syncing with
-# gradio_frontend.ui_layout.VIBE_CHOICES
-# For now, use the direct definition.
-VIBE_CHOICES_TUPLE: Final = (
-    "None",
-    "Calm",
-    "Serene",
-    "Excited",
-    "Happy",
-    "Sad",
-    "Whisper",
-    "Angry",
-    "Fearful",
-    "Dramatic",
-    "Formal",
-    "Authoritative",
-    "Friendly",
-    "Playful",
-    "Sarcastic",
-    "Narrative",
-    "Motivational",
-    "Mysterious",
-    "Romantic",
-    "ASMR",
-    "Corporate",
-    "News",
-    "Custom...",
-)  # This should be a tuple for Literal
+# Sourced from gradio_frontend.ui_layout.VIBE_CHOICES
+VIBE_CHOICES_TUPLE: Final = tuple(VIBE_CHOICES)
 
 
 class SpeakerTTSConfig(BaseModel):
-    voice: Literal[
-        "alloy",
-        "ash",
-        "ballad",
-        "coral",
-        "echo",
-        "fable",
-        "onyx",
-        "sage",
-        "nova",
-        "shimmer",
-        "verse",
-    ] = Field(
-        default=OPENAI_VOICES_TUPLE[0],
+    voice: Literal[OPENAI_VOICES_TUPLE] = Field(  # type: ignore[valid-type]
+        default=OPENAI_VOICES_TUPLE[0] if OPENAI_VOICES_TUPLE else "alloy",
         description=(
             "The specific voice to use for the speaker. Must be one of "
             "the standard OpenAI voices."
@@ -83,33 +35,7 @@ class SpeakerTTSConfig(BaseModel):
         ),
     )
 
-    vibe: Optional[
-        Literal[
-            "None",
-            "Calm",
-            "Serene",
-            "Excited",
-            "Happy",
-            "Sad",
-            "Whisper",
-            "Angry",
-            "Fearful",
-            "Dramatic",
-            "Formal",
-            "Authoritative",
-            "Friendly",
-            "Playful",
-            "Sarcastic",
-            "Narrative",
-            "Motivational",
-            "Mysterious",
-            "Romantic",
-            "ASMR",
-            "Corporate",
-            "News",
-            "Custom...",
-        ]
-    ] = Field(
+    vibe: Optional[Literal[VIBE_CHOICES_TUPLE]] = Field(  # type: ignore[valid-type]
         default="None",
         description=(
             "Predefined emotional vibe or style for gpt-4o-mini-tts. "
@@ -126,31 +52,59 @@ class SpeakerTTSConfig(BaseModel):
         ),
     )
 
-    # Potential future Pydantic model_validator:
-    # IF model_type (passed in context or as another field) is tts-1/tts-1-hd THEN
-    #   custom_instructions and vibe should ideally be None or ignored.
-    # IF model_type is gpt-4o-mini-tts THEN
-    #   speed should ideally be 1.0 or ignored.
-    # For now, the orchestrating function will handle applying relevant
-    # fields based on the global TTS model.
+    @model_validator(mode="after")
+    def validate_conditional_fields(self, info: ValidationInfo) -> "SpeakerTTSConfig":
+        model_type = info.context.get("tts_global_model") if info.context else None
+
+        if not model_type:
+            warnings.warn(
+                "SpeakerTTSConfig validation for model-specific fields skipped "
+                "due to missing 'tts_global_model' in validation context.",
+                UserWarning,
+                stacklevel=2,
+            )
+            return self
+
+        if model_type == "gpt-4o-mini-tts":
+            if self.speed is not None and self.speed != 1.0:
+                raise ValueError(
+                    f"For TTS model '{model_type}', speed must be 1.0 or not set. "
+                    f"Got speed: {self.speed}."
+                )
+        elif model_type in ["tts-1", "tts-1-hd"]:
+            if self.vibe is not None and self.vibe != "None":
+                raise ValueError(
+                    f"For TTS model '{model_type}', vibe must be 'None' or not set. "
+                    f"Got vibe: '{self.vibe}'."
+                )
+            if self.custom_instructions is not None:
+                raise ValueError(
+                    f"For TTS model '{model_type}', "
+                    "custom_instructions must not be set. "
+                    f"Got: '{self.custom_instructions}'.",
+                )
+        return self
 
 
 # Define available TTS models
 # TODO: In a future refactor, consider sourcing from or syncing with
-# gradio_frontend.ui_layout.TTS_MODELS_AVAILABLE
+# gradio_frontend.ui_layout.TTS_MODELS_AVAILABLE (this is already fairly synced)
 TTS_MODELS_AVAILABLE_TUPLE: Final = (
     "tts-1-hd",
     "gpt-4o-mini-tts",
-    "tts-1",  # Assuming tts-1 is also a valid option
+    "tts-1",
 )
 
-# Define available speaker config methods
+# Define available speaker config methods for general use
 SPEAKER_CONFIG_METHOD_TUPLE: Final = (
     "global",
     "per_speaker",
     "random_per_speaker",
     "ab_round_robin",
 )
+
+# Define speaker config methods specifically for TTSRequestPayload validation
+TTS_REQUEST_SPEAKER_CONFIG_METHODS_TUPLE: Final = ("global", "per_speaker_configs")
 
 
 class OutputFormatOptions(BaseModel):
@@ -189,9 +143,9 @@ class TTSRequestPayload(BaseModel):
     script_text: str = Field(
         max_length=10000, description="The script text to be synthesized."
     )
-    tts_global_model: Literal["tts-1-hd", "gpt-4o-mini-tts", "tts-1"] = Field(
+    tts_global_model: Literal[TTS_MODELS_AVAILABLE_TUPLE] = Field(  # type: ignore[valid-type]
         description="The global TTS model to use for synthesis."
-    )  # TODO: Use TTS_MODELS_AVAILABLE_TUPLE
+    )
     global_pause_ms: Optional[int] = Field(
         default=500,
         ge=0,
@@ -203,12 +157,10 @@ class TTSRequestPayload(BaseModel):
         description="Options for output audio formats.",
     )
     speaker_config_method: Literal[
-        "global", "per_speaker", "random_per_speaker", "ab_round_robin"
-    ] = Field(
-        description="Method to determine speaker configurations."
-    )  # TODO: Use SPEAKER_CONFIG_METHOD_TUPLE
+        TTS_REQUEST_SPEAKER_CONFIG_METHODS_TUPLE  # type: ignore[valid-type]
+    ] = Field(description="Method to determine speaker configurations.")
     global_speaker_config: Optional[GlobalSpeakerConfig] = Field(
-        default_factory=GlobalSpeakerConfig,
+        default=None,  # Changed from default_factory for explicit None checks
         description=(
             "Global configuration for all speakers, used if method is 'global'."
         ),
@@ -216,7 +168,8 @@ class TTSRequestPayload(BaseModel):
     per_speaker_configs: Optional[list[PerSpeakerConfigItem]] = Field(
         default=None,
         description=(
-            "List of configurations for each speaker, used if method is 'per_speaker'."
+            "List of configurations for each speaker, used if method is "
+            "'per_speaker_configs'."
         ),
     )
     nsfw_check_options: Optional[NSFWCheckOptions] = Field(
@@ -224,11 +177,34 @@ class TTSRequestPayload(BaseModel):
         description="Options for NSFW content checking.",
     )
 
-    # TODO: Add Pydantic model_validator to ensure:
-    # 1. If speaker_config_method is "global", global_speaker_config must be provided.
-    # 2. If speaker_config_method is "per_speaker",
-    #    per_speaker_configs must be provided and not empty.
-    # 3. Other methods might have their own validation logic.
+    @model_validator(mode="after")
+    def validate_speaker_config_logic(self) -> "TTSRequestPayload":
+        if self.speaker_config_method == "global":
+            if self.global_speaker_config is None:
+                raise ValueError(
+                    "If speaker_config_method is 'global', "
+                    "global_speaker_config must be provided."
+                )
+            if (
+                self.per_speaker_configs is not None
+                and len(self.per_speaker_configs) > 0
+            ):
+                raise ValueError(
+                    "If speaker_config_method is 'global', "
+                    "per_speaker_configs must be None or empty."
+                )
+        elif self.speaker_config_method == "per_speaker_configs":
+            if not self.per_speaker_configs:  # Checks for None or empty list
+                raise ValueError(
+                    "If speaker_config_method is 'per_speaker_configs', "
+                    "per_speaker_configs must be provided and not empty."
+                )
+            if self.global_speaker_config is not None:
+                raise ValueError(
+                    "If speaker_config_method is 'per_speaker_configs', "
+                    "global_speaker_config must be None."
+                )
+        return self
 
 
 # --- API Response Payload Models ---

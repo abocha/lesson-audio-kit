@@ -1,10 +1,16 @@
+import logging  # Added for robust CHARS_PER_SECOND_ESTIMATE handling
 import re
 
 # Module-level constants
 MAX_SCRIPT_LENGTH = 10000
 TTS_1_HD_COST_PER_CHAR = 0.00003
 GPT_4O_MINI_TTS_COST_PER_SECOND = 0.015 / 60
-CHARS_PER_SECOND_ESTIMATE = 12
+CHARS_PER_SECOND_ESTIMATE = (
+    12  # Default value, can be non-positive for testing robustness
+)
+DEFAULT_SAFE_CHARS_PER_SECOND_ESTIMATE = (
+    15.0  # Fallback if CHARS_PER_SECOND_ESTIMATE is not positive
+)
 
 
 def parse_dialogue_script(script_text: str) -> tuple[list[dict], int]:
@@ -88,15 +94,29 @@ def calculate_cost(
     if model_name in ["tts-1", "tts-1-hd"]:
         cost_result = total_chars * TTS_1_HD_COST_PER_CHAR
     elif model_name == "gpt-4o-mini-tts":
-        # Note: This logic is based on per-second pricing for gpt-4o-mini-tts
-        # as per the original script's interpretation.
-        if CHARS_PER_SECOND_ESTIMATE <= 0:
-            estimated_duration_seconds = total_chars / 10.0  # Fallback division factor
+        current_chars_per_second = CHARS_PER_SECOND_ESTIMATE
+        if current_chars_per_second <= 0:
+            logging.warning(
+                "CHARS_PER_SECOND_ESTIMATE (%s) is not positive. "
+                "Falling back to default safe estimate of %s chars/sec "
+                "for 'gpt-4o-mini-tts' cost calculation.",
+                current_chars_per_second,
+                DEFAULT_SAFE_CHARS_PER_SECOND_ESTIMATE,
+            )
+            current_chars_per_second = DEFAULT_SAFE_CHARS_PER_SECOND_ESTIMATE
+
+        if total_chars == 0:  # Avoid division by zero if total_chars is 0
+            estimated_duration_seconds = 0.0
         else:
-            estimated_duration_seconds = total_chars / CHARS_PER_SECOND_ESTIMATE
+            estimated_duration_seconds = total_chars / current_chars_per_second
         cost_result = estimated_duration_seconds * GPT_4O_MINI_TTS_COST_PER_SECOND
     else:
-        # Fallback for unknown models: use tts-1-hd rate (as per original script)
+        # Fallback for unknown models: use tts-1-hd rate
+        logging.warning(
+            "Unknown model_name '%s' provided to calculate_cost. "
+            "Falling back to tts-1-hd cost calculation.",
+            model_name,
+        )
         cost_result = total_chars * TTS_1_HD_COST_PER_CHAR
 
     return cost_result
