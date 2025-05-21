@@ -71,6 +71,7 @@ async def _synthesize_and_log_line(
     tts_global_model: str,
     openai_client: AsyncOpenAI,
     current_job_output_path: str,
+    cache_base_dir: str,  # Added for caching
     nsfw_api_url_template: str | None,
     synthesis_details: list[dict],
 ) -> str | None:
@@ -115,6 +116,7 @@ async def _synthesize_and_log_line(
             model=tts_global_model,
             speed=line_speed,
             instructions=line_instructions,
+            cache_base_dir=cache_base_dir,  # Added for caching
             nsfw_api_url_template=nsfw_api_url_template,
             line_index=line_id_for_tts_client,
         )
@@ -253,6 +255,7 @@ async def orchestrate_tts_synthesis(
     resolved_speaker_configs_map: dict[str, SpeakerTTSConfig],
     openai_client: AsyncOpenAI,
     output_directory: str,
+    cache_base_dir: str,  # Added for caching
     nsfw_api_url_template: str | None = None,
 ) -> tuple[str | None, str | None, str]:
     if not parsed_script:
@@ -294,6 +297,7 @@ async def orchestrate_tts_synthesis(
             tts_global_model=tts_global_model,
             openai_client=openai_client,
             current_job_output_path=current_job_output_path,
+            cache_base_dir=cache_base_dir,  # Added for caching
             nsfw_api_url_template=nsfw_api_url_template,
             synthesis_details=synthesis_details,
         )

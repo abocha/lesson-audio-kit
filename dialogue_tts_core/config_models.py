@@ -386,3 +386,27 @@ class TTSJobStatusFailed(BaseModel):
 TTSJobStatusResponse = Union[
     TTSJobStatusPending, TTSJobStatusCompleted, TTSJobStatusFailed
 ]
+
+
+class CacheStatsResponse(BaseModel):
+    cache_size_bytes: int = Field(
+        description="Current total size of the cache in bytes."
+    )
+    cache_size_gb: float = Field(
+        description="Current total size of the cache in gigabytes."
+    )
+    max_cache_size_gb: float = Field(
+        description="Configured maximum cache size in gigabytes."
+    )
+    hits: int = Field(
+        description="Number of cache hits since last reset or server start."
+    )
+    misses: int = Field(
+        description="Number of cache misses since last reset or server start."
+    )
+    errors: int = Field(
+        description="Number of errors during cache get/store operations."
+    )
+    total_lookups: int = Field(
+        description="Total number of cache lookups (hits + misses)."
+    )

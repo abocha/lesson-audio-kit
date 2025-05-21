@@ -1,10 +1,17 @@
 import asyncio
 import os
+import shutil  # Added for cache hit copy
 from typing import Any  # Removed Dict, use dict instead
 import urllib.parse  # For URL encoding text in NSFW check
 
 import httpx  # For NSFW check
 from openai import AsyncOpenAI, OpenAIError, RateLimitError
+
+from .cache_manager import (  # Added for caching
+    generate_cache_key,
+    get_cached_audio,
+    store_audio_to_cache,
+)
 
 OPENAI_VOICES = [
     "alloy",
@@ -95,6 +102,7 @@ async def synthesize_speech_line(  # noqa: C901
     text: str,
     voice: str,
     output_path: str,
+    cache_base_dir: str,  # Added for caching
     model: str = "tts-1-hd",
     speed: float = 1.0,  # Speed parameter (0.25 to 4.0). Default 1.0.
     instructions: str | None = None,  # For models like gpt-4o-mini-tts potentially
@@ -112,6 +120,60 @@ async def synthesize_speech_line(  # noqa: C901
             "Input text is empty. Skipping synthesis."
         )
         return None
+
+    # --- Caching Logic Start ---
+    # Ensure cache_base_dir is provided if caching is to be used.
+    # For now, we assume it's always provided by the orchestrator.
+    # If not, caching attempts will likely fail or be disabled by cache_manager.
+
+    cache_key = generate_cache_key(
+        text=text,
+        voice=voice,
+        model=model,
+        speed=speed,
+        instructions=instructions,
+    )
+    # model parameter is used as model_for_subdir in cache functions
+    cached_audio_path = get_cached_audio(
+        cache_key=cache_key, model_for_subdir=model, cache_base_dir=cache_base_dir
+    )
+
+    if cached_audio_path:
+        print(
+            f"Line {line_index if line_index != -1 else '(unknown)'}: "
+            f"Cache hit for key '{cache_key}'. Using: {cached_audio_path}"
+        )
+        # Ensure the output_path directory exists if we are "copying" to it
+        # For a cache hit, we might want to directly return cached_audio_path
+        # or copy it to the expected output_path.
+        # For simplicity, let's assume the caller can handle the direct cache path.
+        # If output_path needs to be strictly adhered to, a copy is needed here.
+        # For now, returning the direct path from cache.
+        # If the job expects files in its specific job_output_path,
+        # this needs adjustment.
+        # Let's try to copy to the expected output_path to maintain consistency.
+        try:
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            shutil.copy2(cached_audio_path, output_path)
+            return output_path
+        except OSError as e:
+            print(
+                f"Line {line_index if line_index != -1 else '(unknown)'}: "
+                f"Cache hit, but failed to copy {cached_audio_path} "
+                f"to {output_path}. Error: {e}"
+            )
+            # Fall through to synthesis if copy fails? Or return None?
+            # For now, let's fall through to re-synthesize if copy fails.
+            # This might not be ideal as it would count as a miss then.
+            # A better approach might be to return None or raise an error.
+            # Let's return None to indicate failure to provide the file at output_path.
+            return None
+
+    print(
+        f"Line {line_index if line_index != -1 else '(unknown)'}: "
+        f"Cache miss for key '{cache_key}'. Proceeding with synthesis."
+    )
+    # --- Caching Logic End ---
 
     if nsfw_api_url_template and not await is_content_safe(text, nsfw_api_url_template):
         print(
@@ -168,6 +230,28 @@ async def synthesize_speech_line(  # noqa: C901
 
                 # Verify file was created and has content
                 if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                    # --- Caching Logic Start (Store) ---
+                    print(
+                        f"Line {line_index if line_index != -1 else '(unknown)'}: "
+                        f"Storing synthesized audio to cache with key '{cache_key}'."
+                    )
+                    stored_path = store_audio_to_cache(
+                        cache_key=cache_key,
+                        model_for_subdir=model,
+                        audio_file_path=output_path,
+                        cache_base_dir=cache_base_dir,
+                    )
+                    if stored_path:
+                        print(
+                            f"Line {line_index if line_index != -1 else '(unknown)'}: "
+                            f"Successfully cached to {stored_path}"
+                        )
+                    else:
+                        print(
+                            f"Line {line_index if line_index != -1 else '(unknown)'}: "
+                            "Failed to store audio in cache."
+                        )
+                    # --- Caching Logic End (Store) ---
                     return output_path
                 line_msg_prefix = f"Line {line_index if line_index != -1 else ''}: "
                 print(

@@ -8,7 +8,15 @@ if project_root not in sys.path:
 import os  # noqa: E402
 
 from dotenv import load_dotenv  # noqa: E402
+from fastapi import FastAPI, HTTPException  # noqa: E402
 import gradio as gr  # noqa: E402
+
+from dialogue_tts_core.cache_manager import (  # noqa: E402
+    get_cache_stats,
+    get_current_cache_size_bytes,
+)
+from dialogue_tts_core.config_models import CacheStatsResponse  # noqa: E402
+from dialogue_tts_core.dialogue_script_parser import parse_dialogue_script  # noqa: E402
 
 load_dotenv()
 import asyncio  # noqa: E402
@@ -55,6 +63,56 @@ if OPENAI_API_KEY:
     async_openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 else:
     print("CRITICAL ERROR: OPENAI_API_KEY secret is not set.")
+
+app = FastAPI(
+    title="Lesson Audio Kit API",
+    version="v0.1.0",
+    description="API for TTS synthesis and application utilities.",
+)
+
+
+@app.get(
+    "/api/cache/stats", response_model=CacheStatsResponse, tags=["Cache Utilities"]
+)
+async def get_cache_statistics_endpoint() -> "CacheStatsResponse":
+    cache_base_dir_env = os.getenv("APP_CACHE_BASE_DIR")
+    if not cache_base_dir_env:
+        print(
+            "Warning: APP_CACHE_BASE_DIR environment variable not set. "
+            "Using default '.cache/tts_cache'"
+        )
+        cache_base_dir_env = ".cache/tts_cache"
+
+    max_cache_size_gb_env = os.getenv("APP_MAX_CACHE_SIZE_GB", "2.0")
+    try:
+        max_cache_size_gb_config = float(max_cache_size_gb_env)
+    except ValueError:
+        print(
+            f"Warning: Invalid APP_MAX_CACHE_SIZE_GB value "
+            f"'{max_cache_size_gb_env}'. Using default 2.0 GB."
+        )
+        max_cache_size_gb_config = 2.0
+
+    operational_stats = get_cache_stats()
+
+    try:
+        current_size_bytes = get_current_cache_size_bytes(cache_base_dir_env)
+    except (FileNotFoundError, PermissionError, OSError) as e:
+        raise HTTPException(
+            status_code=500, detail=f"Error calculating cache size: {e!s}"
+        ) from e
+
+    current_size_gb = round(current_size_bytes / (1024**3), 3)
+
+    return CacheStatsResponse(
+        cache_size_bytes=current_size_bytes,
+        cache_size_gb=current_size_gb,
+        max_cache_size_gb=max_cache_size_gb_config,
+        hits=operational_stats["hits"],
+        misses=operational_stats["misses"],
+        errors=operational_stats["errors"],
+        total_lookups=operational_stats["total_lookups"],
+    )
 
 
 # --- Main Blocks UI Definition ---
@@ -115,7 +173,8 @@ with gr.Blocks(theme=gr.themes.Soft(), elem_id="main_blocks_ui") as demo:  # typ
                 else "'Not a dict'"
             )
             print(f"State Keys: {keys_str}")
-            unique_speakers = get_speakers_from_script(current_script_text)
+            parsed_script_lines, _ = parse_dialogue_script(current_script_text)
+            unique_speakers = get_speakers_from_script(parsed_script_lines)
             if not unique_speakers:
                 gr.Markdown(
                     "<p style='color: #888; margin-top:10px;'>Enter script & click "
@@ -455,9 +514,19 @@ with gr.Blocks(theme=gr.themes.Soft(), elem_id="main_blocks_ui") as demo:  # typ
             "configuration mismatch.</p>"
         )
 
+app = gr.mount_gradio_app(app, demo, path="/gradio_ui")
 
 # --- Launch ---
 if __name__ == "__main__":
+    import uvicorn
+
+    # asyncio is already imported at the top
     if os.name == "nt":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    demo.queue().launch(debug=True, share=False)
+
+    # Make sure 'app' here refers to the FastAPI instance
+    uvicorn.run(app, host="0.0.0.0", port=7860)
+    # For development with reload, you might use:
+    # uvicorn.run("gradio_frontend.app:app", host="0.0.0.0", port=7860, reload=True)
+    # Ensure the string "gradio_frontend.app:app" correctly points to your
+    # FastAPI app instance.

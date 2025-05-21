@@ -287,6 +287,7 @@ async def handle_script_processing(  # noqa: C901
         resolved_speaker_configs_map=resolved_configs,
         openai_client=async_openai_client,
         output_directory=base_temp_output_dir,  # Orchestrator creates sub-directory
+        cache_base_dir=os.getenv("APP_CACHE_BASE_DIR", ".cache/tts_cache"),  # Added
         nsfw_api_url_template=effective_nsfw_template,
         # progress_callback=progress # If orchestrator supports it directly
     )

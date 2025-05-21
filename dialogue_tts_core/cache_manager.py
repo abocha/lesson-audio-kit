@@ -2,10 +2,16 @@
 
 import hashlib
 import json  # For metadata or complex key components
-import os
 import pathlib
 import shutil
+import threading
 from typing import Any, Optional
+
+# --- Cache Statistics (Module Level) ---
+_cache_hits: int = 0
+_cache_misses: int = 0
+_cache_errors: int = 0  # For errors during cache lookup/store, not GC
+_stats_lock = threading.Lock()
 
 
 # --- Cache Key Generation ---
@@ -68,19 +74,55 @@ def get_cached_audio(
     """
     Retrieves an audio file from the cache.
     `model_for_subdir` determines the subdirectory (e.g., from tts_global_model).
+    Updates cache statistics (hits, misses, errors).
     """
+    global _cache_hits, _cache_misses, _cache_errors
     target_path = _get_cache_file_path(cache_base_dir, model_for_subdir, cache_key)
 
-    if (
-        target_path.exists()
-        and target_path.is_file()
-        and target_path.stat().st_size > 0
-    ):
-        # Optionally, update access time for LRU
-        # os.utime(target_path, None) # or target_path.touch() if exist_ok=True
-        target_path.touch(exist_ok=True)  # Update access and modification time
-        return str(target_path)
-    return None
+    try:
+        if target_path.exists() and target_path.is_file():
+            # Check size after confirming existence and type
+            if target_path.stat().st_size > 0:
+                try:
+                    target_path.touch(exist_ok=True)  # Update access time
+                    with _stats_lock:
+                        _cache_hits += 1
+                    return str(target_path)
+                except OSError as e:
+                    print(
+                        f"Cache: Error touching file {target_path} "
+                        f"during cache get: {e}"
+                    )
+                    with _stats_lock:
+                        _cache_errors += 1
+                    return None
+            else:  # File exists and is a file, but is empty
+                with _stats_lock:
+                    _cache_misses += 1
+                return None
+        else:  # File does not exist or is not a file
+            with _stats_lock:
+                _cache_misses += 1
+            return None
+    except OSError as e:  # Catch file operation errors during lookup
+        print(f"Cache: Unexpected error during cache lookup for {target_path}: {e}")
+        with _stats_lock:
+            _cache_errors += 1
+        return None
+
+
+def _try_delete_cached_file(
+    file_path: pathlib.Path, context_for_error_log: str
+) -> None:
+    """Attempts to delete a file, logging an error on failure."""
+    if file_path.exists():
+        try:
+            file_path.unlink(missing_ok=True)
+        except OSError as e_unlink:
+            print(
+                f"Cache: Error deleting {file_path} "
+                f"({context_for_error_log}): {e_unlink}"
+            )
 
 
 def store_audio_to_cache(
@@ -92,11 +134,15 @@ def store_audio_to_cache(
     """
     Stores a copy of the audio file into the cache.
     `model_for_subdir` is used to determine the subdirectory.
+    Updates cache error statistics if storing or verification fails.
     """
-    if not os.path.exists(audio_file_path) or os.path.getsize(audio_file_path) == 0:
+    global _cache_errors
+
+    source_file = pathlib.Path(audio_file_path)
+    if not source_file.exists() or source_file.stat().st_size == 0:
         print(
-            f"Error: Source audio file for caching is invalid or empty: "
-            f"{audio_file_path}"
+            f"Error: Source audio file for caching is invalid or "
+            f"empty: {audio_file_path}"
         )
         return None
 
@@ -105,24 +151,25 @@ def store_audio_to_cache(
     )
 
     try:
-        # Ensure the target directory structure exists
         target_cache_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(source_file), target_cache_path)
 
-        # Copy the file to the cache location
-        shutil.copy2(
-            audio_file_path, target_cache_path
-        )  # copy2 preserves metadata like timestamps
-
+        # Verify the cached file
         if target_cache_path.exists() and target_cache_path.stat().st_size > 0:
             return str(target_cache_path)
+
+        # If verification failed (implicit else from RET505 fix)
         print(f"Error: Failed to verify cached file after copying: {target_cache_path}")
-        if target_cache_path.exists():  # If it exists but is empty
-            target_cache_path.unlink(missing_ok=True)
+        _try_delete_cached_file(target_cache_path, "after failed verification")
+        with _stats_lock:
+            _cache_errors += 1
         return None
-    except OSError as e:
+
+    except OSError as e:  # Errors from mkdir, copy2, stat
         print(f"Error storing audio to cache at {target_cache_path}: {e}")
-        if target_cache_path.exists():  # Attempt cleanup if copy failed midway
-            target_cache_path.unlink(missing_ok=True)
+        _try_delete_cached_file(target_cache_path, "after OSError during store")
+        with _stats_lock:
+            _cache_errors += 1
         return None
 
 
@@ -245,3 +292,41 @@ def _cleanup_empty_cache_directories(cache_path_obj: pathlib.Path) -> None:
                     print(
                         f"GC: Error removing empty model directory {model_subdir}: {e}"
                     )
+
+
+# --- Cache Statistics API ---
+
+
+def get_cache_stats() -> dict[str, int]:
+    """Returns a dictionary of cache statistics."""
+    with _stats_lock:
+        # Return a copy to ensure thread safety of the returned dict structure
+        # and prevent modification of internal counters by the caller.
+        return {
+            "hits": _cache_hits,
+            "misses": _cache_misses,
+            "errors": _cache_errors,
+            "total_lookups": _cache_hits + _cache_misses,
+        }
+
+
+def reset_cache_stats() -> None:
+    """Resets all cache statistics counters to zero."""
+    global _cache_hits, _cache_misses, _cache_errors
+    with _stats_lock:
+        _cache_hits = 0
+        _cache_misses = 0
+        _cache_errors = 0
+    print("Cache statistics have been reset.")
+
+
+def get_current_cache_size_bytes(cache_base_dir: str) -> int:
+    """
+    Calculates the total size of files in the cache directory.
+    Uses the existing internal _get_directory_size helper.
+    Returns 0 if the cache directory does not exist or is not a directory.
+    """
+    cache_path_obj = pathlib.Path(cache_base_dir)
+    if not cache_path_obj.exists() or not cache_path_obj.is_dir():
+        return 0
+    return _get_directory_size(cache_path_obj)
