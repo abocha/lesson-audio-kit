@@ -1,0 +1,393 @@
+openapi: 3.1.0
+info:
+  title: Lesson Audio Kit TTS API
+  version: v0.1.0 # Corresponds to your pyproject.toml version
+  description: |-
+    API for synthesizing text-to-speech from dialogue scripts.
+    This service accepts a script and configuration parameters to generate audio.
+    It operates asynchronously, returning a job ID for status polling.
+servers:
+  - url: http://localhost:8000/api # Example local server base path
+    description: Local development server
+  - url: https://your-production-domain.com/api # Placeholder for production
+    description: Production server
+
+paths:
+  /tts:
+    post:
+      summary: Submit a TTS Synthesis Job
+      description: |
+        Accepts a dialogue script and TTS configuration to generate audio.
+        The process is asynchronous. A job ID is returned to poll for status.
+      operationId: submitTtsJob
+      tags:
+        - TTS
+      requestBody:
+        description: Payload for TTS synthesis request.
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TTSRequestPayload'
+            examples:
+              globalConfigExample:
+                summary: Using global speaker configuration
+                value:
+                  script_text: "[Alice] Hello world.\n[Bob] Hi there."
+                  tts_global_model: "tts-1-hd"
+                  global_pause_ms: 300
+                  speaker_config_method: "global"
+                  global_speaker_config:
+                    voice: "alloy"
+                    speed: 1.0
+              perSpeakerConfigExample:
+                summary: Using per-speaker configurations
+                value:
+                  script_text: "[Alice] Hello.\n[Bob] Hi!"
+                  tts_global_model: "gpt-4o-mini-tts"
+                  speaker_config_method: "per_speaker_configs"
+                  # global_speaker_config is optional here, can be used as a base for unspecified fields in per_speaker_configs
+                  global_speaker_config:
+                    voice: "onyx" # Default voice if not in per_speaker_configs
+                  per_speaker_configs:
+                    - speaker_name: "Alice"
+                      config:
+                        voice: "nova"
+                        vibe: "Friendly"
+                    - speaker_name: "Bob"
+                      config:
+                        voice: "shimmer"
+                        custom_instructions: "Speak with a slightly higher pitch."
+              randomPerSpeakerExample:
+                summary: Using random voice per speaker
+                value:
+                  script_text: "[Carol] One.\n[David] Two."
+                  tts_global_model: "tts-1"
+                  speaker_config_method: "random_per_speaker"
+                  global_speaker_config: # Optional: acts as base for speed/vibe
+                    speed: 1.1
+              abRoundRobinExample:
+                summary: Using A/B round robin voices
+                value:
+                  script_text: "[Eve] A.\n[Frank] B.\n[Grace] C."
+                  tts_global_model: "tts-1"
+                  speaker_config_method: "ab_round_robin"
+                  global_speaker_config: # Optional: acts as base for speed/vibe
+                    speed: 0.9
+      responses:
+        '202': # Accepted
+          description: TTS job accepted for processing.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TTSJobCreationResponse'
+              example:
+                job_id: "job_abc123xyz789"
+                status_url: "/api/tts/status/job_abc123xyz789" # Make sure this is a full or relative path as intended
+                estimated_completion_time: "30s-2min"
+        '422': # Unprocessable Entity
+          description: Validation error. Invalid input payload.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError' # Standard FastAPI error model
+              example:
+                detail:
+                  - loc: ["body", "tts_global_model"]
+                    msg: "Input should be 'tts-1-hd', 'gpt-4o-mini-tts' or 'tts-1'"
+                    type: "literal_error" # Pydantic v2 style
+        '500': # Internal Server Error
+          description: Internal server error during job submission.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                detail: "An unexpected error occurred."
+
+  /tts/status/{job_id}:
+    get:
+      summary: Get TTS Synthesis Job Status
+      description: Poll this endpoint to get the status of an ongoing or completed TTS job.
+      operationId: getTtsJobStatus
+      tags:
+        - TTS
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          description: The ID of the TTS job.
+          schema:
+            type: string
+            example: "job_abc123xyz789"
+      responses:
+        '200':
+          description: Current status of the TTS job.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TTSJobStatusResponse'
+              examples:
+                pending:
+                  summary: Job is pending
+                  value:
+                    job_id: "job_abc123xyz789"
+                    status: "pending"
+                    progress: 0.25
+                completed:
+                  summary: Job completed successfully
+                  value:
+                    job_id: "job_abc123xyz789"
+                    status: "completed"
+                    message: "Processed 2/2 lines. Individual lines ZIP created. Merged dialogue MP3 created."
+                    outputs:
+                      zip_file_url: "/files/job_abc123xyz789/dialogue_lines.zip"
+                      merged_mp3_url: "/files/job_abc123xyz789/merged_dialogue.mp3"
+                    synthesis_details:
+                      - id: 0
+                        speaker: "Alice"
+                        status: "success"
+                        duration_ms: 2500
+                      - id: 1
+                        speaker: "Bob"
+                        status: "success"
+                        duration_ms: 1800
+                failed:
+                  summary: Job failed
+                  value:
+                    job_id: "job_abc123xyz789"
+                    status: "failed"
+                    error_message: "An unexpected error occurred during synthesis for line 1."
+        '404':
+          description: Job ID not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                detail: "Job ID not found."
+        '500':
+          description: Internal server error retrieving job status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                detail: "An unexpected error occurred."
+
+components:
+  schemas:
+    SpeakerTTSConfig:
+      type: object
+      description: Configuration for a single speaker's TTS output.
+      properties:
+        voice:
+          type: string
+          enum: ["alloy", "ash", "ballad", "coral", "echo", "fable", "onyx", "sage", "nova", "shimmer", "verse"] # From OPENAI_VOICES_TUPLE
+          default: "alloy" # Example, actual default from Pydantic model
+          description: The voice to use for the speaker.
+        speed:
+          type: ["number", "null"] # OpenAPI 3.1.x style for nullable
+          format: float
+          minimum: 0.25
+          maximum: 4.0
+          default: 1.0 # Default from Pydantic if field is present
+          description: Speech speed (0.25 to 4.0). Relevant for tts-1/hd. Can be null.
+        vibe:
+          type: ["string", "null"]
+          enum: ["None", "Calm", "Serene", "Excited", "Happy", "Sad", "Whisper", "Angry", "Fearful", "Dramatic", "Formal", "Authoritative", "Friendly", "Playful", "Sarcastic", "Narrative", "Motivational", "Mysterious", "Romantic", "ASMR", "Corporate", "News", "Custom..."] # From VIBE_CHOICES_TUPLE
+          default: "None"
+          description: Predefined emotional vibe for gpt-4o-mini-tts. Can be null.
+        custom_instructions:
+          type: ["string", "null"]
+          maxLength: 500
+          description: Specific text-based instructions for gpt-4o-mini-tts. Can be null.
+      # Pydantic @model_validator behavior (conditional field validity based on tts_global_model)
+      # should be described in the main endpoint description or relevant field descriptions.
+
+    GlobalSpeakerConfig:
+      $ref: '#/components/schemas/SpeakerTTSConfig'
+
+    SpeakerSpecificConfig:
+      $ref: '#/components/schemas/SpeakerTTSConfig'
+
+    PerSpeakerConfigItem:
+      type: object
+      required:
+        - speaker_name
+        - config
+      properties:
+        speaker_name:
+          type: string
+          description: The name of the speaker.
+        config:
+          $ref: '#/components/schemas/SpeakerSpecificConfig'
+      description: Speaker-specific TTS configuration item.
+
+    OutputFormatOptions:
+      type: object
+      properties:
+        include_individual_lines_zip:
+          type: boolean
+          default: true
+        include_merged_dialogue_mp3:
+          type: boolean
+          default: true
+      description: Options for output audio formats.
+
+    NSFWCheckOptions:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+          default: false
+        api_url_template:
+          type: ["string", "null"]
+      description: Options for NSFW content checking.
+
+    TTSRequestPayload:
+      type: object
+      required:
+        - script_text
+        - tts_global_model
+        - speaker_config_method
+      properties:
+        script_text:
+          type: string
+          maxLength: 10000
+        tts_global_model:
+          type: string
+          enum: ["tts-1-hd", "gpt-4o-mini-tts", "tts-1"] # From TTS_MODELS_AVAILABLE_TUPLE
+        global_pause_ms:
+          type: ["integer", "null"]
+          minimum: 0
+          maximum: 5000
+          # default: 500 # Pydantic model default is None now, API handles default if null
+        output_format_options:
+          # default_factory implies optional and can be null if not provided.
+          # To be strictly correct if it can be absent OR null:
+          oneOf:
+            - $ref: '#/components/schemas/OutputFormatOptions'
+            - type: "null"
+          # Or simply make it not required and type OutputFormatOptions if it cannot be null.
+          # Current Pydantic default=None means it can be absent, and if explicit null, then None.
+          # Let's keep it simpler and assume if provided, it's the object. If absent, factory used.
+          # If it can be explicitly "output_format_options": null, then oneOf is more correct.
+          # Given Pydantic's `default=None`, it means the field is not required.
+          # If sent as `null`, Pydantic will try to set it to None.
+          # For now, `type: ["object", "null"]` with ref might be best, or just not required.
+          # Let's stick to $ref and not required. Tools often handle this.
+        speaker_config_method:
+          type: string
+          enum: ["global", "per_speaker_configs", "random_per_speaker", "ab_round_robin"] # From ACCEPTED_SPEAKER_CONFIG_METHODS_FOR_API
+          default: "global"
+        global_speaker_config:
+          # $ref: '#/components/schemas/GlobalSpeakerConfig'
+          # nullable: true # Pydantic model has default=None
+          # OpenAPI 3.1 style for optional + nullable object reference:
+          oneOf:
+            - $ref: '#/components/schemas/GlobalSpeakerConfig'
+            - type: "null"
+        per_speaker_configs:
+          type: ["array", "null"]
+          items:
+            $ref: '#/components/schemas/PerSpeakerConfigItem'
+        nsfw_check_options:
+          oneOf:
+            - $ref: '#/components/schemas/NSFWCheckOptions'
+            - type: "null"
+      description: Payload for TTS synthesis request.
+
+    TTSJobCreationResponse:
+      type: object
+      required: [job_id, status_url]
+      properties:
+        job_id: { type: string }
+        status_url: { type: string, format: uri-reference }
+        estimated_completion_time: { type: ["string", "null"] }
+      description: Response after successfully submitting a TTS job.
+
+    TTSJobOutputs:
+      type: object
+      properties:
+        zip_file_url: { type: ["string", "null"], format: uri-reference }
+        merged_mp3_url: { type: ["string", "null"], format: uri-reference }
+      description: URLs to the output files of a completed TTS job.
+
+    TTSSynthesisDetail:
+      type: object
+      required: [id, speaker, status]
+      properties:
+        id: { type: integer }
+        speaker: { type: string }
+        status: { type: string }
+        duration_ms: { type: ["integer", "null"] }
+        error: { type: ["string", "null"] }
+      description: Details of a single line's synthesis attempt.
+
+    TTSJobStatusBase: # For common fields in polymorphic status response
+      type: object
+      required: [job_id, status]
+      properties:
+        job_id: { type: string }
+        status: { type: string, enum: ["pending", "processing", "completed", "failed"] }
+      discriminator: # Key for polymorphism
+        propertyName: status
+
+    TTSJobStatusPending:
+      allOf:
+        - $ref: '#/components/schemas/TTSJobStatusBase'
+        - type: object
+          properties:
+            status: { type: string, enum: ["pending", "processing"] } # More specific
+            progress: { type: ["number", "null"], format: float, minimum: 0.0, maximum: 1.0 }
+      description: Status of a TTS job that is pending or processing.
+
+    TTSJobStatusCompleted:
+      allOf:
+        - $ref: '#/components/schemas/TTSJobStatusBase'
+        - type: object
+          required: [message, outputs]
+          properties:
+            status: { type: string, enum: ["completed"] } # More specific
+            message: { type: string }
+            outputs: { $ref: '#/components/schemas/TTSJobOutputs' }
+            synthesis_details: { type: ["array", "null"], items: { $ref: '#/components/schemas/TTSSynthesisDetail' } }
+      description: Status of a successfully completed TTS job.
+
+    TTSJobStatusFailed:
+      allOf:
+        - $ref: '#/components/schemas/TTSJobStatusBase'
+        - type: object
+          required: [error_message]
+          properties:
+            status: { type: string, enum: ["failed"] } # More specific
+            error_message: { type: string }
+      description: Status of a failed TTS job.
+
+    TTSJobStatusResponse:
+      oneOf:
+        - $ref: '#/components/schemas/TTSJobStatusPending'
+        - $ref: '#/components/schemas/TTSJobStatusCompleted'
+        - $ref: '#/components/schemas/TTSJobStatusFailed'
+      description: Represents the possible states of a TTS job. (Discriminator inherited from TTSJobStatusBase helps tools).
+
+    ErrorDetail: # For HTTPValidationError items
+      type: object
+      properties:
+        loc: { type: array, items: { type: string } } # Simplified, can be union of string/integer
+        msg: { type: string }
+        type: { type: string }
+      description: Detail of a single validation error.
+
+    HTTPValidationError: # Standard FastAPI validation error model
+      type: object
+      properties:
+        detail: { type: array, items: { $ref: '#/components/schemas/ErrorDetail' } }
+      description: Validation error response model.
+
+    ErrorResponse: # Generic error response for 404, 500 etc.
+      type: object
+      properties:
+        detail: { type: string }
+      description: Generic error response.

@@ -12,6 +12,10 @@ A modular application for generating educational lesson content and converting i
 - `.vscode/`: VS Code workspace settings.
 - `pyproject.toml`: Python project configuration and dependencies (Poetry).
 
+## API Documentation
+
+- [OpenAPI 3.1.0 Specification](docs/api/openapi.yaml)
+
 ## Setup
 
 1. **Clone the repository:**
