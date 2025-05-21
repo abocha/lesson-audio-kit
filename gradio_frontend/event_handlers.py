@@ -16,7 +16,10 @@ from ui_layout import (
 )
 
 from dialogue_tts_core.audio_utils import merge_mp3_files
-from dialogue_tts_core.parser import calculate_cost, parse_dialogue_script
+from dialogue_tts_core.dialogue_script_parser import (
+    calculate_cost,
+    parse_dialogue_script,
+)
 from dialogue_tts_core.tts_client import synthesize_speech_line
 
 

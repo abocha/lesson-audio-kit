@@ -1,6 +1,6 @@
 import pytest
 
-from dialogue_tts_core.parser import (
+from dialogue_tts_core.dialogue_script_parser import (
     CHARS_PER_SECOND_ESTIMATE,
     GPT_4O_MINI_TTS_COST_PER_SECOND,
     MAX_SCRIPT_LENGTH,
