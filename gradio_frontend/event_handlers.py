@@ -4,47 +4,58 @@ import os
 import random
 import shutil
 import tempfile
-from typing import Any, Optional
-import zipfile
+from typing import Any, Literal, Optional, cast
 
 import gradio as gr
-from openai import AsyncOpenAI  # Moved import here
+from openai import AsyncOpenAI
 from ui_layout import (
     APP_AVAILABLE_VOICES,
     DEFAULT_VIBE,
     PREDEFINED_VIBES,
 )
 
-from dialogue_tts_core.audio_utils import merge_mp3_files
-from dialogue_tts_core.dialogue_script_parser import (
-    calculate_cost,
-    parse_dialogue_script,
+from dialogue_tts_core.audio_utils import (
+    merge_mp3_files,  # noqa: F401 - merge_mp3_files might be used by orchestrator or implicitly
 )
-from dialogue_tts_core.tts_client import synthesize_speech_line
+
+# from dialogue_tts_core.tts_client import synthesize_speech_line # Now by orchestrator
+from dialogue_tts_core.config_models import OPENAI_VOICES_TUPLE, SpeakerTTSConfig
+from dialogue_tts_core.dialogue_script_parser import (
+    calculate_cost,  # calculate_cost is still used elsewhere in this file
+    parse_dialogue_script,
+    # get_speakers_from_script will be defined locally for now,
+    # as per pseudocode it should take parsed_lines
+)
+from dialogue_tts_core.tts_orchestrator import orchestrate_tts_synthesis
+
+# Explicitly define the Literal type for OpenAI voices for robust casting
+OpenAIVoiceLiteralType = Literal[
+    "alloy",
+    "ash",
+    "ballad",
+    "coral",
+    "echo",
+    "fable",
+    "onyx",
+    "sage",
+    "nova",
+    "shimmer",
+    "verse",
+]
 
 
-def get_speakers_from_script(script_text: str) -> list:
-    """Extracts unique, ordered speaker names from the script."""
-    if not script_text or not script_text.strip():
+def get_speakers_from_script(parsed_lines: list[dict]) -> list[str]:
+    """Extracts unique, ordered speaker names from parsed script lines."""
+    if not parsed_lines:
         return []
-    try:
-        parsed_lines, _ = parse_dialogue_script(script_text)
-        if not parsed_lines:
-            return []
-        seen_speakers = set()
-        ordered_unique_speakers = []
-        for line_data in parsed_lines:
-            speaker = line_data.get("speaker")
-            if speaker and speaker not in seen_speakers:
-                ordered_unique_speakers.append(speaker)
-                seen_speakers.add(speaker)
-        return ordered_unique_speakers
-    except ValueError:
-        print("ValueError during script parsing in get_speakers_from_script.")
-        return []
-    except Exception as e:  # noqa: BLE001 - Last-resort catch for unexpected parsing errors
-        print(f"Unexpected error in get_speakers_from_script: {e}")
-        return []
+    seen_speakers = set()
+    ordered_unique_speakers = []
+    for line_data in parsed_lines:
+        speaker = line_data.get("speaker")
+        if speaker and speaker not in seen_speakers:
+            ordered_unique_speakers.append(speaker)
+            seen_speakers.add(speaker)
+    return ordered_unique_speakers
 
 
 def handle_dynamic_accordion_input_change(
@@ -80,217 +91,236 @@ def handle_dynamic_accordion_input_change(
 async def handle_script_processing(  # noqa: C901
     openai_api_key: str,
     async_openai_client: AsyncOpenAI,
-    nsfw_api_url_template: str,
+    nsfw_api_url_template: str,  # This should be treated as Optional[str]
     dialogue_script: str,
-    tts_model: str,
-    pause_ms: int,
-    speaker_config_method: str,
-    global_voice_selection: str,
-    speaker_configs_state_dict: dict,
-    global_speed: float,
-    global_instructions: str,
+    tts_model: str,  # This is the tts_global_model for the orchestrator
+    pause_ms: int,  # This is the global_pause_ms for the orchestrator
+    speaker_config_method: str,  # UI method string
+    global_voice_selection: str,  # UI selected global voice
+    speaker_configs_state_dict: dict,  # UI state for detailed per-speaker configs
+    global_speed: float,  # UI global speed
+    global_instructions: str,  # UI global instructions
     progress: Optional[gr.Progress] = None,
 ) -> tuple[str | None, str | None, str]:
     if progress is None:
         progress = gr.Progress(track_tqdm=True)
+
+    progress(0, desc="Initializing...")
+
+    # 1. Initial Validations
     if not openai_api_key or not async_openai_client:
         return None, None, "Error: OpenAI API Key or client is not configured."
     if not dialogue_script or not dialogue_script.strip():
         return None, None, "Error: Script is empty."
 
-    job_audio_path_prefix = os.path.join(
-        tempfile.gettempdir(), f"dialogue_tts_job_{random.randint(10000, 99999)}"
-    )
-    if os.path.exists(job_audio_path_prefix):
-        shutil.rmtree(job_audio_path_prefix)
-    os.makedirs(job_audio_path_prefix, exist_ok=True)
+    # 2. Prepare a base output directory for the orchestrator
+    base_temp_output_dir = tempfile.mkdtemp(prefix="gradio_tts_job_base_")
 
+    # 3. Parse script
     try:
-        parsed_lines, _ = parse_dialogue_script(dialogue_script)
+        parsed_lines, _total_chars = parse_dialogue_script(dialogue_script)
         if not parsed_lines:
-            shutil.rmtree(job_audio_path_prefix)
+            shutil.rmtree(base_temp_output_dir)
             return None, None, "Error: No valid lines found in script."
     except ValueError as e:
-        shutil.rmtree(job_audio_path_prefix)
+        shutil.rmtree(base_temp_output_dir)
         return None, None, f"Script parsing error: {e!s}"
 
+    progress(0.1, desc="Script parsed. Resolving speaker configurations...")
+
+    # 4. Resolve Speaker Configurations to map[str, SpeakerTTSConfig]
+    resolved_configs: dict[str, SpeakerTTSConfig] = {}
+    unique_speakers_in_script = get_speakers_from_script(parsed_lines)
+
     if not isinstance(speaker_configs_state_dict, dict):
-        print(
-            "Warning: speaker_configs_state_dict was not a dict in "
-            "handle_script_processing. "
-            f"Re-initializing. Type: {type(speaker_configs_state_dict)}"
-        )
         speaker_configs_state_dict = {}
 
-    safe_default_global_voice = (
-        global_voice_selection
-        if global_voice_selection in APP_AVAILABLE_VOICES
-        else (APP_AVAILABLE_VOICES[0] if APP_AVAILABLE_VOICES else "alloy")
-    )
+    # Determine safe_default_global_voice, ensuring it's a valid Literal
+    _default_voice_from_tuple = (
+        OPENAI_VOICES_TUPLE[0] if OPENAI_VOICES_TUPLE else "alloy"
+    )  # Fallback if tuple is empty
 
-    speaker_voice_map = {}  # Calculated once if needed
-    if speaker_config_method in ["Random per Speaker", "A/B Round Robin"]:
-        unique_script_speakers_for_map = get_speakers_from_script(dialogue_script)
-        temp_voices_pool = APP_AVAILABLE_VOICES.copy()
-        if not temp_voices_pool:
-            temp_voices_pool = [safe_default_global_voice]
-
-        if speaker_config_method == "Random per Speaker":
-            for spk_name in unique_script_speakers_for_map:
-                speaker_voice_map[spk_name] = random.choice(temp_voices_pool)
-        elif speaker_config_method == "A/B Round Robin" and temp_voices_pool:
-            for i, spk_name in enumerate(unique_script_speakers_for_map):
-                speaker_voice_map[spk_name] = temp_voices_pool[
-                    i % len(temp_voices_pool)
-                ]
-
-    processed_results_map = {}
-    total_lines = len(parsed_lines)
-    progress(0, desc="Starting: Preparing for audio synthesis...")
-
-    for i, line_data in enumerate(parsed_lines):
-        speaker_name = line_data["speaker"]
-        line_text = line_data["text"]
-        line_id = line_data["id"]
-
-        # Determine voice, speed, and instructions for the current line
-        line_voice = safe_default_global_voice
-        line_speed = global_speed
-        line_instructions = (
-            global_instructions.strip()
-            if global_instructions and global_instructions.strip()
-            else None
-        )
-
-        if speaker_config_method == "Detailed Configuration (Per Speaker UI)":
-            spk_cfg = speaker_configs_state_dict.get(speaker_name, {})
-            line_voice = spk_cfg.get("voice", safe_default_global_voice)
-            if tts_model in ["tts-1", "tts-1-hd"]:
-                line_speed = float(spk_cfg.get("speed", global_speed))
-            # For gpt-4o-mini-tts, detailed instructions/vibe
-            if tts_model == "gpt-4o-mini-tts":
-                vibe = spk_cfg.get("vibe", DEFAULT_VIBE)
-                custom_instr_raw = spk_cfg.get("custom_instructions", "")
-                custom_instr = custom_instr_raw.strip() if custom_instr_raw else ""
-                current_line_specific_instructions = None
-                if vibe == "Custom..." and custom_instr:
-                    current_line_specific_instructions = custom_instr
-                elif (
-                    vibe != "None"
-                    and vibe != "Custom..."
-                    and PREDEFINED_VIBES.get(vibe)
-                ):
-                    current_line_specific_instructions = PREDEFINED_VIBES[vibe]
-                line_instructions = (
-                    current_line_specific_instructions
-                    if current_line_specific_instructions is not None
-                    else line_instructions
-                )
-        elif speaker_config_method in ["Random per Speaker", "A/B Round Robin"]:
-            line_voice = speaker_voice_map.get(speaker_name, safe_default_global_voice)
-            # Speed and instructions remain global for these methods
-
-        # Ensure speed is 1.0 if model does not support it explicitly,
-        # or handled globally
-        if tts_model not in ["tts-1", "tts-1-hd"]:
-            line_speed = 1.0
-
-        out_fn = os.path.join(
-            job_audio_path_prefix,
-            f"line_{line_id}_{speaker_name.replace(' ', '_')}.mp3",
-        )
-
-        # Update progress BEFORE awaiting the synthesis for this line
-        progress_fraction = (i + 1) / total_lines
-        progress(
-            progress_fraction,
-            desc=f"Synthesizing: Line {i + 1}/{total_lines} ('{speaker_name}')",
-        )
-
-        try:
-            result_path = await synthesize_speech_line(
-                client=async_openai_client,
-                text=line_text,
-                voice=line_voice,
-                output_path=out_fn,
-                model=tts_model,
-                speed=line_speed,
-                instructions=line_instructions,
-                nsfw_api_url_template=nsfw_api_url_template,
-                line_index=line_id,
-            )
-            processed_results_map[line_id] = {
-                "path": result_path,
-                "speaker": speaker_name,
-            }
-        except Exception as e:  # noqa: BLE001 # Catch any unexpected error during individual line synthesis
-            print(f"Error synthesizing line ID {line_id} ({speaker_name}): {e}")
-            processed_results_map[line_id] = {
-                "path": None,
-                "error": str(e),
-                "speaker": speaker_name,
-            }
-
-    progress(1.0, desc="Finalizing: Assembling audio files...")
-
-    ordered_files_for_merge_and_zip = []
-    for p_line in parsed_lines:
-        line_id = p_line["id"]
-        res = processed_results_map.get(line_id)
-        if (
-            res
-            and res.get("path")
-            and os.path.exists(res["path"])
-            and os.path.getsize(res["path"]) > 0
-        ):
-            ordered_files_for_merge_and_zip.append(res["path"])
-        else:
-            if res:
-                print(
-                    f"Skipped or failed synthesizing line ID {line_id} "
-                    f"({res.get('speaker', 'Unknown')}) for merge/zip. "
-                    f"Error: {res.get('error')}"
-                )
-            else:
-                print(
-                    f"Result for line ID {line_id} not found in processed_results_map."
-                )
-
-    valid_files_for_zip = [f for f in ordered_files_for_merge_and_zip if f]
-
-    if not valid_files_for_zip:
-        shutil.rmtree(job_audio_path_prefix)
-        return None, None, "Error: No audio was successfully synthesized for any line."
-
-    zip_fn = os.path.join(job_audio_path_prefix, "dialogue_lines.zip")
-    with zipfile.ZipFile(zip_fn, "w") as zf:
-        for f_path in valid_files_for_zip:
-            zf.write(f_path, os.path.basename(f_path))
-
-    files_to_actually_merge = valid_files_for_zip
-    merged_fn = os.path.join(job_audio_path_prefix, "merged_dialogue.mp3")
-    merged_path = merge_mp3_files(files_to_actually_merge, merged_fn, pause_ms)
-
-    status_msg = (
-        f"Successfully processed {len(valid_files_for_zip)} "
-        f"out of {len(parsed_lines)} lines. "
-    )
-    if len(valid_files_for_zip) < len(parsed_lines):
-        status_msg += "Some lines may have failed. Check console for details. "
-    if not merged_path and len(valid_files_for_zip) > 0:
-        status_msg += "Merging audio failed. "
-    elif not merged_path:
-        status_msg = "No audio to merge (all lines failed or were skipped)."
+    if global_voice_selection in OPENAI_VOICES_TUPLE:
+        safe_default_global_voice = global_voice_selection
+    # Check if APP_AVAILABLE_VOICES[0] is a valid literal before assigning
+    elif APP_AVAILABLE_VOICES and APP_AVAILABLE_VOICES[0] in OPENAI_VOICES_TUPLE:
+        safe_default_global_voice = APP_AVAILABLE_VOICES[0]
     else:
-        status_msg += "Merged audio generated."
+        safe_default_global_voice = _default_voice_from_tuple  # This is a known Literal
 
-    progress(1.0, desc="Processing complete!")  # Final update
-
-    return (
-        zip_fn if os.path.exists(zip_fn) else None,
-        merged_path if merged_path and os.path.exists(merged_path) else None,
-        status_msg,
+    default_global_tts_config = SpeakerTTSConfig(
+        voice=safe_default_global_voice,  # This is now guaranteed to be a valid Literal
+        speed=global_speed if tts_model in ["tts-1", "tts-1-hd"] else 1.0,
+        vibe="None",
+        custom_instructions=global_instructions.strip()
+        if global_instructions and tts_model == "gpt-4o-mini-tts"
+        else None,
     )
+
+    if speaker_config_method == "Single Voice (Global)":
+        for speaker_name in unique_speakers_in_script:
+            resolved_configs[speaker_name] = default_global_tts_config.copy(deep=True)
+
+    elif speaker_config_method == "Random per Speaker":
+        # Ensure the pool contains only valid Literal voice names
+        effective_voices_pool = [
+            v for v in APP_AVAILABLE_VOICES if v in OPENAI_VOICES_TUPLE
+        ]
+        if not effective_voices_pool:
+            effective_voices_pool = [
+                safe_default_global_voice
+            ]  # safe_default_global_voice is a Literal
+
+        for speaker_name in unique_speakers_in_script:
+            _chosen_voice_str = random.choice(effective_voices_pool)
+            # Use Pydantic's model_fields to get the annotation for casting
+            chosen_voice_literal = cast(OpenAIVoiceLiteralType, _chosen_voice_str)
+            resolved_configs[speaker_name] = SpeakerTTSConfig(
+                voice=chosen_voice_literal,
+                speed=default_global_tts_config.speed,
+                vibe=default_global_tts_config.vibe,
+                custom_instructions=default_global_tts_config.custom_instructions,
+            )
+
+    elif speaker_config_method == "A/B Round Robin":
+        # Ensure the pool contains only valid Literal voice names
+        effective_voices_pool_ab = [
+            v for v in APP_AVAILABLE_VOICES if v in OPENAI_VOICES_TUPLE
+        ]
+        if not effective_voices_pool_ab:
+            effective_voices_pool_ab = [
+                safe_default_global_voice
+            ]  # safe_default_global_voice is a Literal
+
+        for i, speaker_name in enumerate(unique_speakers_in_script):
+            _chosen_voice_str_ab = effective_voices_pool_ab[
+                i % len(effective_voices_pool_ab)
+            ]
+            # Use Pydantic's model_fields to get the annotation for casting
+            chosen_voice_literal_ab = cast(OpenAIVoiceLiteralType, _chosen_voice_str_ab)
+            resolved_configs[speaker_name] = SpeakerTTSConfig(
+                voice=chosen_voice_literal_ab,
+                speed=default_global_tts_config.speed,
+                vibe=default_global_tts_config.vibe,
+                custom_instructions=default_global_tts_config.custom_instructions,
+            )
+
+    elif speaker_config_method == "Detailed Configuration (Per Speaker UI)":
+        for speaker_name in unique_speakers_in_script:
+            speaker_ui_settings = speaker_configs_state_dict.get(speaker_name, {})
+            current_speaker_resolved_config = default_global_tts_config.copy(deep=True)
+
+            # Validate voice from UI settings
+            ui_voice_selection = speaker_ui_settings.get(
+                "voice", default_global_tts_config.voice
+            )
+            if (
+                ui_voice_selection in OPENAI_VOICES_TUPLE
+            ):  # Check against the Literal tuple
+                current_speaker_resolved_config.voice = ui_voice_selection
+            else:
+                # Fallback if UI somehow provided an invalid voice string
+                current_speaker_resolved_config.voice = (
+                    default_global_tts_config.voice
+                )  # which is a known Literal
+
+            final_custom_instructions_for_speaker = (
+                default_global_tts_config.custom_instructions
+            )
+
+            if tts_model in ["tts-1", "tts-1-hd"]:
+                current_speaker_resolved_config.speed = float(
+                    speaker_ui_settings.get("speed", default_global_tts_config.speed)
+                )
+
+            elif tts_model == "gpt-4o-mini-tts":
+                speaker_vibe_selection = speaker_ui_settings.get("vibe", DEFAULT_VIBE)
+                speaker_custom_instr_text = speaker_ui_settings.get(
+                    "custom_instructions", ""
+                ).strip()
+                current_speaker_resolved_config.vibe = speaker_vibe_selection
+                temp_line_instr = None
+                if speaker_vibe_selection == "Custom..." and speaker_custom_instr_text:
+                    temp_line_instr = speaker_custom_instr_text
+                elif (
+                    speaker_vibe_selection != "None"
+                    and speaker_vibe_selection != "Custom..."
+                    and PREDEFINED_VIBES.get(speaker_vibe_selection)
+                ):
+                    temp_line_instr = PREDEFINED_VIBES[speaker_vibe_selection]
+
+                if temp_line_instr is not None:
+                    final_custom_instructions_for_speaker = temp_line_instr
+
+                current_speaker_resolved_config.custom_instructions = (
+                    final_custom_instructions_for_speaker
+                )
+                current_speaker_resolved_config.speed = 1.0  # Speed not applicable for
+                # gpt-4o-mini-tts via API
+
+            resolved_configs[speaker_name] = current_speaker_resolved_config
+    else:
+        shutil.rmtree(base_temp_output_dir)
+        return (
+            None,
+            None,
+            f"Error: Unknown speaker configuration method '{speaker_config_method}'.",
+        )
+
+    # Ensure all speakers in the script have a configuration, even if it's the default
+    for speaker_name in unique_speakers_in_script:
+        if speaker_name not in resolved_configs:
+            resolved_configs[speaker_name] = default_global_tts_config.copy(deep=True)
+
+    progress(0.3, desc="Configurations resolved. Starting TTS orchestration...")
+
+    effective_nsfw_template = (
+        nsfw_api_url_template
+        if nsfw_api_url_template and nsfw_api_url_template.strip()
+        else None
+    )
+
+    zip_file_path, merged_file_path, status_message = await orchestrate_tts_synthesis(
+        parsed_script=parsed_lines,
+        tts_global_model=tts_model,
+        global_pause_ms=pause_ms,
+        resolved_speaker_configs_map=resolved_configs,
+        openai_client=async_openai_client,
+        output_directory=base_temp_output_dir,  # Orchestrator creates sub-directory
+        nsfw_api_url_template=effective_nsfw_template,
+        # progress_callback=progress # If orchestrator supports it directly
+    )
+
+    # If orchestrator doesn't handle progress updates internally,
+    # we might need to adjust this.
+    # For now, assume orchestrate_tts_synthesis is a long-running task and update
+    # progress after it.
+    # The pseudocode implies progress updates within the orchestrator or that it's
+    # quick enough.
+    # Let's assume the orchestrator handles its own internal progress if it's complex,
+    # or we set to 1.0 after it's done.
+    progress(1.0, desc="Processing complete!")
+
+    # Cleanup: if orchestrator created a job-specific subfolder and it's now empty
+    # (e.g. all failed)
+    # or if the base_temp_output_dir itself is empty (e.g. orchestrator failed early)
+    # This part might need refinement based on orchestrator's exact behavior
+    # with output_directory
+    if (
+        zip_file_path is None
+        and merged_file_path is None
+        and os.path.exists(base_temp_output_dir)
+        and not os.listdir(base_temp_output_dir)
+    ):
+        # Check if base_temp_output_dir is empty or has an empty job subfolder
+        # This logic is a bit simplified; a more robust check might be needed.
+        shutil.rmtree(base_temp_output_dir)
+        # If orchestrator creates a sub-dir, e.g. base_temp_output_dir/job_XYZ,
+        # and that sub-dir is empty, we might want to clean that too.
+        # For now, the orchestrator is expected to return None paths if it cleans up
+        # its own failed job dir.
+
+    return zip_file_path, merged_file_path, status_message
 
 
 # ... (rest of the event_handlers.py file remains the same) ...
