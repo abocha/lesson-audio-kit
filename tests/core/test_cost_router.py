@@ -17,7 +17,7 @@ from dialogue_tts_core.cost_router import (
 
 # --- Test Data and Fixtures ---
 @pytest.fixture
-def mock_engine_table(monkeypatch: MonkeyPatch) -> dict[str, EngineMeta]:
+def _mock_engine_table(monkeypatch: MonkeyPatch) -> dict[str, EngineMeta]:
     # Provide a controlled engine table for most tests
     test_engines = {
         "test_cheapest_mid": EngineMeta(
@@ -100,7 +100,7 @@ def mock_engine_table(monkeypatch: MonkeyPatch) -> dict[str, EngineMeta]:
 
 
 @pytest.fixture
-def mock_free_tiers_config(monkeypatch: MonkeyPatch) -> None:
+def _mock_free_tiers_config(monkeypatch: MonkeyPatch) -> None:
     test_free_tiers = {"cartesia_sonic-test": 20000}  # 20k free chars
     monkeypatch.setattr("dialogue_tts_core.cost_router.FREE_TIERS", test_free_tiers)
     test_free_pool = ["cartesia_sonic-test"]
@@ -131,7 +131,7 @@ def test_calculate_cost_direct_mchar_with_input_cost() -> None:
     assert _calculate_effective_cost_per_mchar(engine, 1000) == 25.0
 
 
-def test_calculate_cost_per_minute(_monkeypatch: MonkeyPatch) -> None:
+def test_calculate_cost_per_minute() -> None:
     engine = EngineMeta(
         "p",
         "m3",
@@ -145,7 +145,7 @@ def test_calculate_cost_per_minute(_monkeypatch: MonkeyPatch) -> None:
     )
 
 
-def test_calculate_cost_per_minute_with_input_cost(_monkeypatch: MonkeyPatch) -> None:
+def test_calculate_cost_per_minute_with_input_cost() -> None:
     engine = EngineMeta(
         "p",
         "m4",
@@ -192,7 +192,9 @@ def test_select_engine_basic_selection(
     assert selected.model_id == "cheapest_mid"
 
 
-def test_select_engine_quality_filter(mock_engine_table: dict[str, EngineMeta]) -> None:
+def test_select_engine_quality_filter(
+    _mock_engine_table: dict[str, EngineMeta],
+) -> None:
     selected_high = select_engine(char_len=1000, desired_quality=QualityTier.HIGH)
     assert selected_high.model_id == "expensive_high_slow"
 
@@ -203,7 +205,7 @@ def test_select_engine_quality_filter(mock_engine_table: dict[str, EngineMeta]) 
     # Create a copy of the engine table and remove/downgrade ULTRA tier engines
     temp_engine_table = {
         k: v
-        for k, v in mock_engine_table.items()
+        for k, v in _mock_engine_table.items()
         if v.quality_tier != QualityTier.ULTRA
     }
     # If an ULTRA engine was the only one, make it HIGH
@@ -211,8 +213,8 @@ def test_select_engine_quality_filter(mock_engine_table: dict[str, EngineMeta]) 
         "test_ultra_expensive" in temp_engine_table
     ):  # Should not be if logic above is correct
         pass  # it's already removed
-    elif "test_ultra_expensive" in mock_engine_table:  # if it existed in original
-        engine_to_downgrade = mock_engine_table["test_ultra_expensive"]
+    elif "test_ultra_expensive" in _mock_engine_table:  # if it existed in original
+        engine_to_downgrade = _mock_engine_table["test_ultra_expensive"]
         temp_engine_table["test_ultra_expensive_downgraded"] = EngineMeta(
             provider=engine_to_downgrade.provider,
             model_id=engine_to_downgrade.model_id,
@@ -227,15 +229,13 @@ def test_select_engine_quality_filter(mock_engine_table: dict[str, EngineMeta]) 
 
     with (
         patch("dialogue_tts_core.cost_router.ENGINE_TABLE", temp_engine_table),
-        pytest.raises(
-            RuntimeError, match="No engines found matching or exceeding desired quality"
-        ),
+        pytest.raises(RuntimeError, match=r"No engines match desired quality: ULTRA"),
     ):
         select_engine(char_len=1000, desired_quality=QualityTier.ULTRA)
 
 
 def test_select_engine_low_latency_preference(
-    mock_engine_table: dict[str, EngineMeta], caplog: LogCaptureFixture
+    _mock_engine_table: dict[str, EngineMeta], caplog: LogCaptureFixture
 ) -> None:
     # Using LATENCY_THRESHOLD_MS from cost_router (default 350ms)
     selected = select_engine(
@@ -268,7 +268,7 @@ def test_select_engine_low_latency_preference(
             if v.quality_tier == QualityTier.MID
             else v
         )
-        for k, v in mock_engine_table.items()
+        for k, v in _mock_engine_table.items()
     }
     # Ensure at least one MID engine exists, even if high latency
     if not any(
@@ -290,13 +290,13 @@ def test_select_engine_low_latency_preference(
         # Should still select a MID engine, but log a warning
         assert selected_fallback.quality_tier == QualityTier.MID
         assert any(
-            "No low-latency engines found" in record.message
+            "No low-latency engines found in desired quality tier." in record.message
             for record in caplog.records
         )
 
 
 def test_select_engine_emotion_support_preference(
-    mock_engine_table: dict[str, EngineMeta], caplog: LogCaptureFixture
+    _mock_engine_table: dict[str, EngineMeta], caplog: LogCaptureFixture
 ) -> None:
     selected = select_engine(
         char_len=500, desired_quality=QualityTier.MID, prefer_emotion_support=True
@@ -323,7 +323,7 @@ def test_select_engine_emotion_support_preference(
             if v.quality_tier == QualityTier.MID
             else v
         )
-        for k, v in mock_engine_table.items()
+        for k, v in _mock_engine_table.items()
     }
     # Ensure at least one MID engine exists
     if not any(
@@ -350,7 +350,8 @@ def test_select_engine_emotion_support_preference(
             not selected_fallback.supports_emotion
         )  # Confirms it picked one without emotion
         assert any(
-            "No emotion-supporting engines found" in record.message
+            "No emotion-supporting engines found in desired quality tier."
+            in record.message
             for record in caplog.records
         )
 
@@ -366,7 +367,13 @@ def test_select_engine_budget_constraint(
     # Expected: cheapest_mid
     assert selected.model_id == "cheapest_mid"
 
-    with pytest.raises(RuntimeError, match="No engines meet the budget constraint"):
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            r"No engines meet budget \$\d+\.\d{4} for \d+ chars from current "
+            r"candidates."
+        ),
+    ):
         select_engine(
             char_len=10000, desired_quality=QualityTier.MID, max_cost_usd_for_job=0.05
         )
@@ -458,7 +465,7 @@ def test_select_engine_char_len_zero(_mock_engine_table: dict[str, EngineMeta]) 
 def test_select_engine_empty_table(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr("dialogue_tts_core.cost_router.ENGINE_TABLE", {})
     with pytest.raises(
-        RuntimeError, match="No engines found matching or exceeding desired quality"
+        RuntimeError, match=r"No engines match desired quality: MID"
     ):  # Default is MID
         select_engine(char_len=100)
 
@@ -490,7 +497,7 @@ def test_select_engine_tie_breaking(monkeypatch: MonkeyPatch) -> None:
     }
     monkeypatch.setattr("dialogue_tts_core.cost_router.ENGINE_TABLE", engines_qual)
     selected = select_engine(char_len=100, desired_quality=QualityTier.LOW)
-    assert selected.model_id == "m2_qual"  # Higher quality preferred
+    assert selected.model_id == "m3_qual"  # Closest quality (LOW) preferred
 
     # Same cost, different latency, same quality
     engines_lat = {
@@ -512,3 +519,67 @@ def test_select_engine_tie_breaking(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr("dialogue_tts_core.cost_router.ENGINE_TABLE", engines_lat)
     selected_lat = select_engine(char_len=100, desired_quality=QualityTier.MID)
     assert selected_lat.model_id == "m2_lat"  # Lower latency preferred
+
+
+def test_select_engine_multiple_unavailable_preferences(
+    monkeypatch: MonkeyPatch, caplog: LogCaptureFixture
+) -> None:
+    # Setup a mock engine table where MID tier engines exist, but none meet
+    # low latency OR emotion support preferences.
+    mock_engine_table_unavailable_prefs = {
+        "mid_high_latency_no_emotion_1": EngineMeta(
+            "test_provider",
+            "mid_high_latency_no_emotion_1",
+            price_per_mchar_output_audio_usd=10.0,
+            latency_ms=LATENCY_THRESHOLD_MS + 50,  # High latency
+            quality_tier=QualityTier.MID,
+            supports_emotion=False,
+        ),
+        "mid_high_latency_no_emotion_2": EngineMeta(
+            "test_provider",
+            "mid_high_latency_no_emotion_2",
+            price_per_mchar_output_audio_usd=11.0,
+            latency_ms=LATENCY_THRESHOLD_MS + 10,  # High latency, slightly better
+            quality_tier=QualityTier.MID,
+            supports_emotion=False,
+        ),
+        "high_low_latency_emotion": EngineMeta(
+            "test_provider",
+            "high_low_latency_emotion",
+            price_per_mchar_output_audio_usd=20.0,
+            latency_ms=LATENCY_THRESHOLD_MS - 50,  # Low latency
+            quality_tier=QualityTier.HIGH,
+            supports_emotion=True,
+        ),
+    }
+    monkeypatch.setattr(
+        "dialogue_tts_core.cost_router.ENGINE_TABLE",
+        mock_engine_table_unavailable_prefs,
+    )
+
+    caplog.clear()
+    with caplog.at_level(
+        "WARNING", logger="dialogue_tts_core.cost_router"
+    ):  # Capture logs from the router
+        selected = select_engine(
+            char_len=1000,
+            desired_quality=QualityTier.MID,
+            prefer_low_latency=True,
+            prefer_emotion_support=True,
+        )
+
+        # Assert that a MID tier engine is selected, specifically the cheapest/best
+        # among them(which is 'mid_high_latency_no_emotion_1' due to cost, then latency)
+        assert selected.quality_tier == QualityTier.MID
+        assert selected.model_id == "mid_high_latency_no_emotion_1"
+
+        # Assert that warnings for both unavailable preferences are logged
+        warning_messages = [record.message for record in caplog.records]
+        assert any(
+            "No low-latency engines found in desired quality tier." in msg
+            for msg in warning_messages
+        )
+        assert any(
+            "No emotion-supporting engines found in desired quality tier." in msg
+            for msg in warning_messages
+        )

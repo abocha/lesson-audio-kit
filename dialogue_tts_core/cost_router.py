@@ -4,6 +4,7 @@ from __future__ import annotations  # For type hints if needed for older Pythons
 
 from dataclasses import dataclass
 from enum import Enum, auto
+import logging
 import math
 from typing import Final
 
@@ -261,16 +262,18 @@ def _calculate_effective_cost_per_mchar(
 
     # If only input cost is defined
     if engine.price_per_mchar_input_usd is not None:
-        print(
-            f"Warning: Engine '{engine.provider}/{engine.model_id}' only has "
-            f"input cost. Assuming audio output bundled."
+        logging.warning(
+            "Engine '%s/%s' only has input cost. Assuming audio output bundled.",
+            engine.provider,
+            engine.model_id,
         )
         return engine.price_per_mchar_input_usd
 
     # Default case if no other pricing model matched (contents of former else block)
-    print(
-        f"Warning: Engine '{engine.provider}/{engine.model_id}' has no "
-        f"recognized pricing scheme. Cost set to infinity."
+    logging.warning(
+        "Engine '%s/%s' has no recognized pricing scheme. Cost set to infinity.",
+        engine.provider,
+        engine.model_id,
     )
     return float("inf")
 
@@ -294,64 +297,82 @@ def select_engine(  # noqa: C901
     """
     all_engines: list[EngineMeta] = list(ENGINE_TABLE.values())
 
-    feature_preferred_candidates: list[EngineMeta] = all_engines
+    # Step 1: Filter by desired quality (all engines >= desired_quality)
+    quality_candidates = [
+        engine
+        for engine in all_engines
+        if engine.quality_tier.value >= desired_quality.value
+    ]
+    if not quality_candidates:
+        raise RuntimeError(f"No engines match desired quality: {desired_quality.name}")
+
+    # Step 2: Determine preference availability
+    # among all quality candidates (>= desired_quality)
+    low_latency_possible_among_quality_candidates = any(
+        e.latency_ms <= LATENCY_THRESHOLD_MS for e in quality_candidates
+    )
+    emotion_possible_among_quality_candidates = any(
+        e.supports_emotion for e in quality_candidates
+    )
+    voice_cloning_possible_among_quality_candidates = any(
+        e.supports_voice_cloning for e in quality_candidates
+    )
+
+    # Determine preference availability specifically within the desired quality tier
+    desired_tier_only_candidates = [
+        e for e in quality_candidates if e.quality_tier == desired_quality
+    ]
+    low_latency_possible_in_desired_tier = any(
+        e.latency_ms <= LATENCY_THRESHOLD_MS for e in desired_tier_only_candidates
+    )
+    emotion_possible_in_desired_tier = any(
+        e.supports_emotion for e in desired_tier_only_candidates
+    )
+    voice_cloning_possible_in_desired_tier = any(
+        e.supports_voice_cloning for e in desired_tier_only_candidates
+    )
+
+    # Step 3: Apply preferences as hard filters IF possible within the desired tier.
+    # If not possible within desired tier, log warning and DO NOT filter.
+    candidate_engines = list(
+        quality_candidates
+    )  # Start with all engines >= desired_quality
+
+    if prefer_low_latency:
+        if low_latency_possible_in_desired_tier:
+            candidate_engines = [
+                engine
+                for engine in candidate_engines
+                if engine.latency_ms <= LATENCY_THRESHOLD_MS
+            ]
+        else:
+            logging.warning("No low-latency engines found in desired quality tier.")
 
     if prefer_emotion_support:
-        emotion_candidates = [
-            engine for engine in feature_preferred_candidates if engine.supports_emotion
-        ]
-        if emotion_candidates:  # Only filter if matches are found
-            feature_preferred_candidates = emotion_candidates
+        if emotion_possible_in_desired_tier:
+            candidate_engines = [
+                engine for engine in candidate_engines if engine.supports_emotion
+            ]
         else:
-            print(
-                "Warning: prefer_emotion_support=True, but no engines found "
-                "with emotion support. Considering all prior candidates."
+            logging.warning(
+                "No emotion-supporting engines found in desired quality tier."
             )
 
     if prefer_voice_cloning:
-        voice_cloning_candidates = [
-            engine
-            for engine in feature_preferred_candidates
-            if engine.supports_voice_cloning
-        ]
-        if voice_cloning_candidates:
-            feature_preferred_candidates = voice_cloning_candidates
+        if voice_cloning_possible_in_desired_tier:
+            candidate_engines = [
+                engine for engine in candidate_engines if engine.supports_voice_cloning
+            ]
         else:
-            print(
-                "Warning: prefer_voice_cloning=True, but no engines found "
-                "with voice cloning support. Considering all prior candidates."
-            )
-
-    candidate_engines: list[EngineMeta] = feature_preferred_candidates
-
-    candidate_engines = [
-        engine
-        for engine in candidate_engines
-        if engine.quality_tier.value >= desired_quality.value
-    ]
-    if not candidate_engines:
-        raise RuntimeError(
-            f"No engines match features AND desired quality: {desired_quality.name}"
-        )
-
-    if prefer_low_latency:
-        low_latency_candidates = [
-            engine
-            for engine in candidate_engines
-            if engine.latency_ms <= LATENCY_THRESHOLD_MS
-        ]
-        if low_latency_candidates:
-            candidate_engines = low_latency_candidates
-        else:
-            print(
-                f"Warning: prefer_low_latency=True, but no engines met the "
-                f"{LATENCY_THRESHOLD_MS}ms threshold. Considering current candidates."
+            logging.warning(
+                "No voice cloning-supporting engines found in desired quality tier."
             )
 
     if not candidate_engines:
-        raise RuntimeError("No engines meet quality and latency preferences.")
+        raise RuntimeError("No engines meet all specified criteria.")
 
-    priced_candidates: list[tuple[EngineMeta, float, bool]] = []
+    # Step 4: Prepare candidates with cost, quality gap, and preference penalties
+    priced_candidates: list[tuple[EngineMeta, float, bool, int, int, int, int]] = []
 
     for engine in candidate_engines:
         uses_free_tier = False
@@ -364,7 +385,7 @@ def select_engine(  # noqa: C901
                 uses_free_tier = True
                 job_cost_for_engine = 0.0000001
 
-        if not uses_free_tier:  # Calculate paid cost if not using free tier
+        if not uses_free_tier:
             job_cost_for_engine = (
                 _calculate_effective_cost_per_mchar(engine, char_len) / CHARS_IN_ONE_M
             ) * char_len
@@ -372,15 +393,70 @@ def select_engine(  # noqa: C901
         if math.isinf(job_cost_for_engine):
             continue
 
-        priced_candidates.append((engine, job_cost_for_engine, uses_free_tier))
+        quality_gap = abs(engine.quality_tier.value - desired_quality.value)
+
+        pref_lat_penalty = 1
+        if prefer_low_latency:
+            if (
+                low_latency_possible_among_quality_candidates
+                and engine.latency_ms <= LATENCY_THRESHOLD_MS
+            ):
+                pref_lat_penalty = 0
+            elif not low_latency_possible_among_quality_candidates:
+                pref_lat_penalty = 0  # Neutralize penalty if preference is impossible
+        else:
+            pref_lat_penalty = 0
+
+        pref_emotion_penalty = 1
+        if prefer_emotion_support:
+            if emotion_possible_among_quality_candidates and engine.supports_emotion:
+                pref_emotion_penalty = 0
+            elif not emotion_possible_among_quality_candidates:
+                pref_emotion_penalty = (
+                    0  # Neutralize penalty if preference is impossible
+                )
+        else:
+            pref_emotion_penalty = 0
+
+        pref_clone_penalty = 1
+        if prefer_voice_cloning:
+            if (
+                voice_cloning_possible_among_quality_candidates
+                and engine.supports_voice_cloning
+            ):
+                pref_clone_penalty = 0
+            elif not voice_cloning_possible_among_quality_candidates:
+                pref_clone_penalty = 0  # Neutralize penalty if preference is impossible
+        else:
+            pref_clone_penalty = 0
+
+        priced_candidates.append(
+            (
+                engine,
+                job_cost_for_engine,
+                uses_free_tier,
+                quality_gap,
+                pref_lat_penalty,
+                pref_emotion_penalty,
+                pref_clone_penalty,
+            )
+        )
 
     if not priced_candidates:
         raise RuntimeError("No priceable engines meet prior constraints.")
 
     if max_cost_usd_for_job is not None:
         budget_met_candidates = [
-            (eng, cost, is_free)
-            for eng, cost, is_free in priced_candidates
+            (eng, cost, is_free, q_gap, lat_pen, emo_pen, clone_pen)
+            for (
+                eng,
+                cost,
+                is_free,
+                q_gap,
+                lat_pen,
+                emo_pen,
+                clone_pen,
+            ) in priced_candidates
             if cost <= max_cost_usd_for_job
         ]
         if not budget_met_candidates:
@@ -393,8 +469,20 @@ def select_engine(  # noqa: C901
     if not priced_candidates:
         raise RuntimeError("No viable engines found after budget filtering.")
 
+    # Step 5: Sort candidates based on the new criteria
     priced_candidates.sort(
-        key=lambda x: (not x[2], x[1], x[0].latency_ms, -x[0].quality_tier.value)
+        key=lambda x: (
+            not x[2],  # 1. Free tier first (False for "not is_free" means free,
+            # so free comes first)
+            x[1],  # 2. Then by job cost
+            x[3],  # 3. Then by quality_gap (absolute distance from desired quality)
+            x[4],  # 4. Then by low latency preference penalty
+            x[5],  # 5. Then by emotion support preference penalty
+            x[6],  # 6. Then by voice cloning preference penalty
+            x[0].latency_ms,  # 7. Then by raw latency
+            -x[0].quality_tier.value,  # 8. Then by quality (higher is better,
+            # hence negative)
+        )
     )
 
     return priced_candidates[0][0]
