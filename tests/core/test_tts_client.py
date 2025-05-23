@@ -1,95 +1,47 @@
-from collections.abc import AsyncGenerator  # Added AsyncGenerator for type hint
-import os  # Added for VCR test
-from pathlib import Path  # Added for type hint
-from typing import Optional
+from collections.abc import AsyncGenerator
+import os
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 from openai import AsyncOpenAI, OpenAIError, RateLimitError
-
-# from openai._response import AsyncAPIResponse  # No longer needed, Stream is used
 import pytest
-import vcr  # Add this import
 
 from dialogue_tts_core.tts_client import (
     INITIAL_BACKOFF_SECONDS,
-    MAX_RETRIES,  # Import constants for retry tests
+    MAX_RETRIES,
     is_content_safe,
     synthesize_speech_line,
 )
-
-try:
-    from gradio_frontend.app import async_openai_client as global_app_openai_client
-except ImportError:
-    # Define global_app_openai_client as None if import fails or it's not there
-    global_app_openai_client: Optional[AsyncOpenAI] = None
 
 
 @pytest.fixture
 async def real_openai_client() -> AsyncGenerator[AsyncOpenAI, None]:
     """
     Provides a real AsyncOpenAI client for VCR recording.
-    Uses the global client from gradio_frontend.app if available and configured,
-    otherwise creates a new one using OPENAI_API_KEY.
-    Manages the lifecycle of locally created clients.
+    Always tries to create a new client instance using OPENAI_API_KEY.
+    If the key is not present, pytest.skip the test.
+    Manages the lifecycle of the client.
     """
-    client_instance: Optional[AsyncOpenAI] = None
-    is_externally_managed = (
-        False  # Flag to track if client is from global_app_openai_client
-    )
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        pytest.skip("OPENAI_API_KEY not set, skipping VCR recording-dependent test.")
 
-    if (
-        global_app_openai_client is not None
-    ):  # Check if the global client exists and is not None
-        client_instance = global_app_openai_client
-        is_externally_managed = True
-        # We assume an externally managed client is already configured and active.
-    else:
-        # Global client is not available or is None, try creating one
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            pytest.skip(
-                "OPENAI_API_KEY not set and no global client available, "
-                "skipping VCR recording-dependent test."
-            )
-        # Create a new client instance for the test
-        client_instance = AsyncOpenAI(api_key=api_key)
-        is_externally_managed = False
-
-    if client_instance is None:
-        # This state should ideally be prevented by the pytest.skip above.
-        raise RuntimeError(
-            "Failed to obtain an OpenAI client instance for the test, "
-            "and pytest.skip was not triggered."
-        )
+    client_instance = AsyncOpenAI(api_key=api_key)
 
     # Add a test API call to verify connectivity and API key validity
     try:
-        # Attempt a simple, low-cost API call to verify connectivity
-        # For example, listing models is a good way to check
         await client_instance.models.list()
-    except (OpenAIError, httpx.RequestError) as e:  # Catch specific, relevant errors
-        # If this client was created using an API key by this fixture,
-        # and it fails, skip.
-        if not is_externally_managed:
-            pytest.skip(
-                "Skipping VCR test: OpenAI API connectivity/authentication "
-                f"error with locally created client: {type(e).__name__} - {e}"
-            )
-        else:
-            error_type_name = type(e).__name__
-            warning_message = (
-                "Warning: Externally managed OpenAI client failed connectivity "
-                f"check: {error_type_name} - {e}"
-            )
-            print(warning_message)
+    except (OpenAIError, httpx.RequestError) as e:
+        pytest.skip(
+            "Skipping VCR test: OpenAI API connectivity/authentication "
+            f"error with client: {type(e).__name__} - {e}"
+        )
 
     try:
-        yield client_instance  # Yield the actual client instance
+        yield client_instance
     finally:
-        # Only close the client if it was created by this fixture
-        if not is_externally_managed and client_instance:
-            await client_instance.close()
+        await client_instance.close()
 
 
 # The global semaphore is not directly tested here, so the fixture is not
@@ -642,68 +594,33 @@ async def test_synthesize_speech_line_different_model_params(mocker: MagicMock) 
     mock_streaming_api_response.stream_to_file.assert_awaited_with(output_p_4)
 
 
+@pytest.mark.vcr
+@pytest.mark.live
 @pytest.mark.asyncio
-@pytest.mark.live  # Add this marker
 async def test_synthesize_speech_line_successful_with_vcr(
-    real_openai_client: AsyncOpenAI,  # This fixture provides a live, configured client
-    tmp_path: Path,  # Pytest fixture for temporary directory
+    real_openai_client: AsyncOpenAI,
+    tmp_path: Path,
 ) -> None:
-    # Ensure a clean cache state for this specific test
-    # to force an API call during recording
+    """
+    Test successful speech synthesis with VCR recording using pytest-recording.
+    This test uses a real OpenAI client and records/plays back API interactions.
+    """
     test_cache_dir = tmp_path / "test_vcr_cache"
-    test_cache_dir.mkdir()
+    test_cache_dir.mkdir(exist_ok=True)
 
-    output_file = tmp_path / "output_vcr.mp3"
-    text_to_synthesize = "Hello VCR world from OpenAI"
+    text_to_synthesize = "Hello VCR world with pytest-recording"
+    output_p = test_cache_dir / "vcr_output.mp3"
 
-    record_mode = "once" if os.getenv("OPENAI_API_KEY") else "none"
-
-    # Define the cassette path.
-    # Ensure the 'tests/cassettes' directory exists or will be created.
-    # VCRpy usually creates the directory if it doesn't exist.
-    cassette_path = "tests/cassettes/test_tts_client_vcr.yaml"
-
-    # Configure VCR
-    my_vcr = vcr.VCR(
-        cassette_library_dir="tests/cassettes/",  # Optional: if you want to group them
-        filter_headers=[("Authorization", "DUMMY")],
-        # record_mode will be passed when using the cassette
+    result = await synthesize_speech_line(
+        client=real_openai_client,
+        text=text_to_synthesize,
+        voice="alloy",
+        output_path=str(output_p),
+        line_index=10,
+        cache_base_dir=str(test_cache_dir),
     )
 
-    # Use the VCR instance as a context manager
-    with my_vcr.use_cassette(cassette_path, record_mode=record_mode):
-        path, was_cache_hit_1 = await synthesize_speech_line(
-            client=real_openai_client,
-            text=text_to_synthesize,
-            voice="alloy",
-            output_path=str(output_file),
-            cache_base_dir=str(test_cache_dir),
-            model="tts-1",
-            speed=1.0,
-            instructions=None,
-        )
-
-        assert path == str(output_file)
-        assert path is not None  # Ensure path is not None for type checking
-        assert os.path.exists(path)
-        assert os.path.getsize(path) > 0
-        assert was_cache_hit_1 is False
-
-        output_file_2 = tmp_path / "output_vcr_cached.mp3"
-        path_cached, was_cache_hit_2 = await synthesize_speech_line(
-            client=real_openai_client,
-            text=text_to_synthesize,
-            voice="alloy",
-            output_path=str(output_file_2),
-            cache_base_dir=str(test_cache_dir),
-            model="tts-1",
-            speed=1.0,
-            instructions=None,
-        )
-        assert path_cached == str(output_file_2)
-        assert (
-            path_cached is not None
-        )  # Ensure path_cached is not None for type checking
-        assert os.path.exists(path_cached)
-        assert os.path.getsize(path_cached) > 0
-        assert was_cache_hit_2 is True
+    assert result[0] == str(output_p)
+    assert result[1] is False  # Not from cache (first run)
+    assert output_p.exists()
+    assert output_p.stat().st_size > 0

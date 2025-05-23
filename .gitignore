@@ -8,8 +8,13 @@ venv/
 .env
 .DS_Store
 /tmp/
+# Exclude the .gitkeep file to ensure the /tmp/ directory is tracked in Git
 !/tmp/.gitkeep
 *.log
-
+# Cache directory for TTS (Text-to-Speech) data
 .cache/tts_cache/
+
 .job_outputs/
+# Ignore this specific cassette file for test TTS client due to sensitive data or other reasons
+tests/cassettes/test_tts_client_vcr.yaml
+.test/cassettes/
