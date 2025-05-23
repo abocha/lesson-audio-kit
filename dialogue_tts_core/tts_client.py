@@ -1,7 +1,7 @@
 import asyncio
 import os
 import shutil  # Added for cache hit copy
-from typing import Any, Optional
+from typing import Any
 import urllib.parse  # For URL encoding text in NSFW check
 
 import httpx  # For NSFW check
@@ -108,7 +108,7 @@ async def synthesize_speech_line(  # noqa: C901
     instructions: str | None = None,  # For models like gpt-4o-mini-tts potentially
     nsfw_api_url_template: str | None = None,
     line_index: int = -1,  # For logging purposes
-) -> tuple[Optional[str], bool]:
+) -> tuple[str | None, bool]:
     """
     Synthesizes a single line of text to speech using OpenAI TTS.
     Handles rate limiting with exponential backoff and NSFW checks.
@@ -147,21 +147,21 @@ async def synthesize_speech_line(  # noqa: C901
                 f"Line {line_index if line_index != -1 else '(unknown)'}: "
                 f"Cache hit, but copied file is missing or empty: {output_path}"
             )
-        # Fall through to synthesis if copy failed or resulted in empty file
+            return None, False  # Copied file is bad
         except OSError as e:
             print(
                 f"Line {line_index if line_index != -1 else '(unknown)'}: "
                 f"Cache hit, but failed to copy {cached_audio_path} "
                 f"to {output_path}. Error: {e}"
             )
-            # Fall through to synthesis if copy fails
+            return None, False  # Treat as failure if copy OSError
 
     if nsfw_api_url_template and not await is_content_safe(text, nsfw_api_url_template):
         print(
             f"Line {line_index if line_index != -1 else '(unknown)'}: "
             "Content flagged as potentially unsafe. Skipping synthesis."
         )
-        return None, False  # Skip synthesis for flagged content
+        return None, False
 
     current_retry = 0
     backoff_seconds = INITIAL_BACKOFF_SECONDS
@@ -211,14 +211,14 @@ async def synthesize_speech_line(  # noqa: C901
                             f"Line {line_index if line_index != -1 else '(unknown)'}: "
                             "Failed to store audio in cache."
                         )
-                    return output_path, False  # Newly synthesized
+                    return output_path, False
 
                 line_msg_prefix = f"Line {line_index if line_index != -1 else ''}: "
                 print(
                     f"{line_msg_prefix}Synthesis appeared to succeed but "
                     f"output file is missing or empty: {output_path}"
                 )
-                return None, False  # File not created or empty
+                return None, False
 
             except RateLimitError as e:
                 current_retry += 1

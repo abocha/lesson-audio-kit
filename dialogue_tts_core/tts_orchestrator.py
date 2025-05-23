@@ -46,7 +46,7 @@ def _create_job_directory(
         return None, error_message
 
 
-async def _synthesize_and_log_line(
+async def _synthesize_and_log_line(  # noqa: C901
     line_data: dict,
     speaker_specific_config: SpeakerTTSConfig,
     user_id: Optional[str],
@@ -58,57 +58,73 @@ async def _synthesize_and_log_line(
     current_job_output_path: str,
     cache_base_dir: str,
     nsfw_api_url_template: Optional[str],
-    synthesis_details_list: list[dict],
+    synthesis_details_list: list[dict[str, Any]],
 ) -> Optional[str]:
     """Synthesizes a single line and logs details."""
     line_id = line_data.get("id", "unknown_id")
     speaker_name = line_data.get("speaker", "UnknownSpeaker")
     text_to_synthesize = line_data.get("text", "")
+    char_len = len(text_to_synthesize)
 
-    line_detail: dict[str, Any] = {
+    line_detail_entry: dict[str, Any] = {
         "id": line_id,
         "speaker": speaker_name,
         "text": text_to_synthesize,
-        "status": "unknown",
+        "text_length": char_len,
+        "status": "pending",
         "error": None,
         "path": None,
-        "cache_status": None,
+        "cache_status": "unknown",
         "engine_provider": None,
         "engine_model_id": None,
-        "cost_usd": None,
+        "actual_line_cost_usd": None,  # Placeholder for now
     }
+    synthesis_details_list.append(line_detail_entry)  # Add entry immediately
 
     if not text_to_synthesize.strip():
-        line_detail.update({"status": "skipped", "error": "Empty text line"})
-        synthesis_details_list.append(line_detail)
+        line_detail_entry.update({"status": "skipped", "error": "Empty text line"})
         return None
 
     try:
         selected_engine: EngineMeta = select_engine(
-            char_len=len(text_to_synthesize),
+            char_len=char_len,
             desired_quality=desired_quality_tier,
             max_cost_usd_for_job=max_line_cost_usd,
             prefer_low_latency=prefer_low_latency_routing,
             prefer_emotion_support=prefer_emotion_support_routing,
             user_id=user_id,
         )
-        line_detail["engine_provider"] = selected_engine.provider
-        line_detail["engine_model_id"] = selected_engine.model_id
+        line_detail_entry["engine_provider"] = selected_engine.provider
+        line_detail_entry["engine_model_id"] = selected_engine.model_id
     except RuntimeError as e:
-        line_detail.update(
+        line_detail_entry.update(
             {"status": "failed", "error": f"Engine selection failed: {e}"}
         )
-        synthesis_details_list.append(line_detail)
         print(f"Error selecting engine for line ID '{line_id}': {e}")
         return None
 
     line_voice = speaker_specific_config.voice
-    line_speed = (
-        speaker_specific_config.speed
-        if speaker_specific_config.speed is not None
-        else 1.0
-    )
-    line_instructions = speaker_specific_config.custom_instructions
+    line_speed = 1.0
+    if selected_engine.provider == "openai" and selected_engine.model_id in [
+        "tts-1",
+        "tts-1-hd",
+    ]:
+        line_speed = (
+            speaker_specific_config.speed
+            if speaker_specific_config.speed is not None
+            else 1.0
+        )
+
+    line_instructions: Optional[str] = None
+    if selected_engine.supports_emotion:
+        line_instructions = speaker_specific_config.custom_instructions
+
+    # Provider Dispatch (Conceptual for now)
+    if selected_engine.provider != "openai":
+        error_msg = f"Unsupported TTS provider: {selected_engine.provider}"
+        print(error_msg)
+        line_detail_entry.update({"status": "failed", "error": error_msg})
+        return None
 
     tts_model_for_client = selected_engine.model_id
 
@@ -143,14 +159,14 @@ async def _synthesize_and_log_line(
         if synthesized_path_tuple:
             synthesized_path, was_cache_hit = synthesized_path_tuple
 
-        line_detail["cache_status"] = "hit" if was_cache_hit else "miss"
+        line_detail_entry["cache_status"] = "hit" if was_cache_hit else "miss"
 
         if (
             synthesized_path
             and os.path.exists(synthesized_path)
             and os.path.getsize(synthesized_path) > 0
         ):
-            line_detail.update({"status": "success", "path": synthesized_path})
+            line_detail_entry.update({"status": "success", "path": synthesized_path})
         else:
             error_msg = "Synthesis failed or produced empty file"
             if not synthesized_path:
@@ -159,13 +175,13 @@ async def _synthesize_and_log_line(
                 error_msg = f"Synthesized file path does not exist: {synthesized_path}"
             elif os.path.getsize(synthesized_path) == 0:
                 error_msg = f"Synthesized file is empty: {synthesized_path}"
-            line_detail.update({"status": "failed", "error": error_msg})
+            line_detail_entry.update({"status": "failed", "error": error_msg})
 
-    except RuntimeError as e:
-        line_detail.update({"status": "failed", "error": f"Synthesis exception: {e}"})
+    except Exception as e:  # noqa: BLE001  # Catch general Exception for synthesis
+        line_detail_entry.update(
+            {"status": "failed", "error": f"Synthesis exception: {e}"}
+        )
         print(f"Error during synthesis for line ID '{line_id}': {e}")
-    finally:
-        synthesis_details_list.append(line_detail)
     return synthesized_path
 
 
@@ -215,48 +231,49 @@ def _package_audio_files(
     return zip_output_path, merged_audio_output_path
 
 
-def _compile_status_message(
-    synthesis_details: list[dict[str, Any]],
-    total_lines: int,
-    zip_file_path: Optional[str],
-    merged_file_path: Optional[str],
-    num_actually_synthesized_files: int,
-) -> str:
-    """Compiles the final status message."""
-    num_successful = sum(1 for d in synthesis_details if d.get("status") == "success")
+def _compile_status_message(all_lines_synthesis_details: list[dict[str, Any]]) -> str:
+    """Compiles the final status message based on detailed synthesis results."""
+    total_lines = len(all_lines_synthesis_details)
+    num_successful = sum(
+        1 for d in all_lines_synthesis_details if d.get("status") == "success"
+    )
     num_cached = sum(
         1
-        for d in synthesis_details
+        for d in all_lines_synthesis_details
         if d.get("status") == "success" and d.get("cache_status") == "hit"
     )
-    num_failed = sum(1 for d in synthesis_details if d.get("status") == "failed")
-    num_skipped = sum(1 for d in synthesis_details if d.get("status") == "skipped")
+    num_failed = sum(
+        1 for d in all_lines_synthesis_details if d.get("status") == "failed"
+    )
+    num_skipped = sum(
+        1 for d in all_lines_synthesis_details if d.get("status") == "skipped"
+    )
     num_newly_synthesized = sum(
         1
-        for d in synthesis_details
+        for d in all_lines_synthesis_details
         if d.get("status") == "success" and d.get("cache_status") == "miss"
     )
 
-    message_parts = [f"TTS Job Summary: Total Lines: {total_lines}"]
-    if num_successful > 0:
-        message_parts.append(
-            f"Successful: {num_successful} (Cached: {num_cached}, "
-            f"Newly Synthesized: {num_newly_synthesized})"
+    engine_usage: dict[str, int] = {}
+    for d in all_lines_synthesis_details:
+        if d.get("status") == "success":
+            provider = d.get("engine_provider", "unknown")
+            model_id = d.get("engine_model_id", "unknown")
+            engine_key = f"{provider} {model_id}"
+            engine_usage[engine_key] = engine_usage.get(engine_key, 0) + 1
+
+    message_parts = [f"TTS Job Summary: Total lines: {total_lines}."]
+    message_parts.append(f"Successful: {num_successful}.")
+    message_parts.append(f"Failed: {num_failed}.")
+    message_parts.append(f"Skipped: {num_skipped}.")
+    message_parts.append(f"Cache hits: {num_cached}.")
+    message_parts.append(f"Newly synthesized: {num_newly_synthesized}.")
+
+    if engine_usage:
+        engine_summary = ", ".join(
+            [f"{engine} ({count} times)" for engine, count in engine_usage.items()]
         )
-    if num_failed > 0:
-        message_parts.append(f"Failed: {num_failed}")
-    if num_skipped > 0:
-        message_parts.append(f"Skipped: {num_skipped}")
-
-    if zip_file_path:
-        message_parts.append("Individual lines ZIP created.")
-    elif num_actually_synthesized_files > 0:
-        message_parts.append("Failed to create ZIP of individual lines.")
-
-    if merged_file_path:
-        message_parts.append("Merged dialogue MP3 created.")
-    elif num_actually_synthesized_files > 0:
-        message_parts.append("Failed to merge dialogue audio.")
+        message_parts.append(f"Engines used: {engine_summary}.")
 
     return " ".join(message_parts).strip()
 
@@ -349,13 +366,7 @@ async def orchestrate_tts_synthesis(
         synthesized_line_files, current_job_output_path, global_pause_ms
     )
 
-    status_message = _compile_status_message(
-        all_lines_synthesis_details,
-        len(parsed_script),
-        zip_output_path,
-        merged_audio_output_path,
-        len(synthesized_line_files),
-    )
+    status_message = _compile_status_message(all_lines_synthesis_details)
 
     return (
         zip_output_path,

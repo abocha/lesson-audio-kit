@@ -103,7 +103,7 @@ async def handle_script_processing(  # noqa: C901
     global_speed: float,  # UI global speed
     global_instructions: str,  # UI global instructions
     progress: Optional[gr.Progress] = None,
-) -> tuple[str | None, str | None, str]:
+) -> tuple[str | None, str | None, str, Any]:
     if progress is None:
         progress = gr.Progress(track_tqdm=True)
 
@@ -111,9 +111,9 @@ async def handle_script_processing(  # noqa: C901
 
     # 1. Initial Validations
     if not openai_api_key or not async_openai_client:
-        return None, None, "Error: OpenAI API Key or client is not configured."
+        return None, None, "Error: OpenAI API Key or client is not configured.", None
     if not dialogue_script or not dialogue_script.strip():
-        return None, None, "Error: Script is empty."
+        return None, None, "Error: Script is empty.", None
 
     # 2. Prepare a base output directory for the orchestrator
     base_temp_output_dir = tempfile.mkdtemp(prefix="gradio_tts_job_base_")
@@ -123,10 +123,10 @@ async def handle_script_processing(  # noqa: C901
         parsed_lines, _total_chars = parse_dialogue_script(dialogue_script)
         if not parsed_lines:
             shutil.rmtree(base_temp_output_dir)
-            return None, None, "Error: No valid lines found in script."
+            return None, None, "Error: No valid lines found in script.", None
     except ValueError as e:
         shutil.rmtree(base_temp_output_dir)
-        return None, None, f"Script parsing error: {e!s}"
+        return None, None, f"Script parsing error: {e!s}", None
 
     progress(0.1, desc="Script parsed. Resolving speaker configurations...")
 
@@ -269,6 +269,7 @@ async def handle_script_processing(  # noqa: C901
             None,
             None,
             f"Error: Unknown speaker configuration method '{speaker_config_method}'.",
+            None,
         )
 
     # Ensure all speakers in the script have a configuration, even if it's the default
@@ -288,21 +289,23 @@ async def handle_script_processing(  # noqa: C901
         zip_file_path,
         merged_file_path,
         status_message,
-        synthesis_details,
+        synthesis_details,  # MODIFIED to receive the new detailed list
     ) = await orchestrate_tts_synthesis(
         parsed_script=parsed_lines,
+        # tts_global_model=tts_model, # REMOVED
         global_pause_ms=pause_ms,
         resolved_speaker_configs_map=resolved_configs,
-        user_id=None,
-        desired_quality_tier=QualityTier.MID,
-        max_total_job_cost_usd=None,
-        prefer_low_latency_routing=False,
-        prefer_emotion_support_routing=False,
+        # --- New routing parameters (using placeholders/defaults for now) ---
+        user_id=None,  # ADDED
+        desired_quality_tier=QualityTier.MID,  # ADDED - Ensure QualityTier is available
+        max_total_job_cost_usd=None,  # ADDED
+        prefer_low_latency_routing=False,  # ADDED
+        prefer_emotion_support_routing=False,  # ADDED
+        # ---
         openai_client=async_openai_client,
-        output_directory=base_temp_output_dir,  # Orchestrator creates sub-directory
-        cache_base_dir=os.getenv("APP_CACHE_BASE_DIR", ".cache/tts_cache"),  # Added
+        output_directory=base_temp_output_dir,
+        cache_base_dir=os.getenv("APP_CACHE_BASE_DIR", ".cache/tts_cache"),
         nsfw_api_url_template=effective_nsfw_template,
-        # progress_callback=progress # If orchestrator supports it directly
     )
 
     # If orchestrator doesn't handle progress updates internally,
@@ -334,7 +337,7 @@ async def handle_script_processing(  # noqa: C901
         # For now, the orchestrator is expected to return None paths if it cleans up
         # its own failed job dir.
 
-    return zip_file_path, merged_file_path, status_message
+    return zip_file_path, merged_file_path, status_message, synthesis_details
 
 
 # ... (rest of the event_handlers.py file remains the same) ...

@@ -140,13 +140,13 @@ async def run_tts_orchestration_task(
     output_base_dir: str,
     cache_base_dir: str,
     nsfw_template: Optional[str],
-) -> None:
+) -> tuple[str | None, str | None, str, list[dict[str, Any]]]:
     global job_store, async_openai_client
     if async_openai_client is None:
         job_store[job_id].update(
             {"status": "failed", "error_message": "OpenAI client not initialized."}
         )
-        return
+        return None, None, "failed", []
 
     job_store[job_id]["status"] = "processing"
     try:
@@ -154,21 +154,27 @@ async def run_tts_orchestration_task(
             zip_path,
             merged_path,
             status_msg,
-            all_lines_synthesis_details,
+            all_lines_details,  # Changed from all_lines_synthesis_details
         ) = await orchestrate_tts_synthesis(
             parsed_script=parsed_script,
+            # tts_global_model=tts_global_model, # REMOVED
             global_pause_ms=global_pause_ms,
             resolved_speaker_configs_map=resolved_configs,
+            # --- New routing parameters (using placeholders/defaults for now) ---
             user_id=None,
             desired_quality_tier=QualityTier.MID,
-            max_total_job_cost_usd=None,
-            prefer_low_latency_routing=False,
-            prefer_emotion_support_routing=False,
+            # ADDED - Ensure QualityTier is available
+            max_total_job_cost_usd=None,  # ADDED
+            prefer_low_latency_routing=False,  # ADDED
+            prefer_emotion_support_routing=False,  # ADDED
+            # ---
             openai_client=async_openai_client,
             output_directory=output_base_dir,
             cache_base_dir=cache_base_dir,
             nsfw_api_url_template=nsfw_template,
         )
+        # Store all_lines_synthesis_details in job_store
+        job_store[job_id]["synthesis_details"] = all_lines_details  # ADDED
 
         job_store[job_id].update(
             {
@@ -180,11 +186,13 @@ async def run_tts_orchestration_task(
                 },
             }
         )
+        return zip_path, merged_path, status_msg, all_lines_details
     except Exception as e:  # noqa: BLE001
         print(f"Error in TTS orchestration task for job {job_id}: {e!s}")
         job_store[job_id].update(
             {"status": "failed", "error_message": f"Orchestration error: {e!s}"}
         )
+        return None, None, f"Orchestration error: {e!s}", []
 
 
 @app.post(
@@ -519,7 +527,7 @@ with gr.Blocks(theme=gr.themes.Soft(), elem_id="main_blocks_ui") as demo:  # typ
         global_speed_ui: float,
         global_instructions_ui: str,
         progress_ui: gr.Progress | None = None,  # Gradio provides this
-    ) -> tuple[str | None, str | None, str]:
+    ) -> tuple[str | None, str | None, str, list[dict[str, Any]]]:
         if not OPENAI_API_KEY or not async_openai_client:
             print(
                 "Error: OpenAI API Key or client is not configured for generate button."
@@ -528,6 +536,7 @@ with gr.Blocks(theme=gr.themes.Soft(), elem_id="main_blocks_ui") as demo:  # typ
                 None,
                 None,
                 "Error: OpenAI API Key or client not set. Cannot generate.",
+                [],
             )
 
         # NSFW_API_URL_TEMPLATE can be None; handle_script_processing handles it.
@@ -605,13 +614,14 @@ with gr.Blocks(theme=gr.themes.Soft(), elem_id="main_blocks_ui") as demo:  # typ
         global_instructions_ex: str,
         # speaker_configs_state_dict is not provided by examples, default to empty
         # progress is not provided by examples
-    ) -> tuple[str | None, str | None, str]:
+    ) -> tuple[str | None, str | None, str, list[dict[str, Any]]]:
         if not OPENAI_API_KEY or not async_openai_client:
             print("Error: OpenAI API Key or client is not configured for examples.")
             return (
                 None,
                 None,
                 "Error: OpenAI API Key or client not set. Cannot process example.",
+                [],
             )
 
         nsfw_template_str_for_call_ex = (
