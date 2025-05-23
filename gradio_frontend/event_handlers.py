@@ -15,6 +15,7 @@ from dialogue_tts_core.audio_utils import (
 
 # from dialogue_tts_core.tts_client import synthesize_speech_line # Now by orchestrator
 from dialogue_tts_core.config_models import OPENAI_VOICES_TUPLE, SpeakerTTSConfig
+from dialogue_tts_core.cost_router import QualityTier
 from dialogue_tts_core.dialogue_script_parser import (
     calculate_cost,  # calculate_cost is still used elsewhere in this file
     parse_dialogue_script,
@@ -153,9 +154,11 @@ async def handle_script_processing(  # noqa: C901
         voice=safe_default_global_voice,  # This is now guaranteed to be a valid Literal
         speed=global_speed if tts_model in ["tts-1", "tts-1-hd"] else 1.0,
         vibe="None",
-        custom_instructions=global_instructions.strip()
-        if global_instructions and tts_model == "gpt-4o-mini-tts"
-        else None,
+        custom_instructions=(
+            global_instructions.strip()
+            if global_instructions and tts_model == "gpt-4o-mini-tts"
+            else None
+        ),
     )
 
     if speaker_config_method == "Single Voice (Global)":
@@ -281,11 +284,20 @@ async def handle_script_processing(  # noqa: C901
         else None
     )
 
-    zip_file_path, merged_file_path, status_message = await orchestrate_tts_synthesis(
+    (
+        zip_file_path,
+        merged_file_path,
+        status_message,
+        synthesis_details,
+    ) = await orchestrate_tts_synthesis(
         parsed_script=parsed_lines,
-        tts_global_model=tts_model,
         global_pause_ms=pause_ms,
         resolved_speaker_configs_map=resolved_configs,
+        user_id=None,
+        desired_quality_tier=QualityTier.MID,
+        max_total_job_cost_usd=None,
+        prefer_low_latency_routing=False,
+        prefer_emotion_support_routing=False,
         openai_client=async_openai_client,
         output_directory=base_temp_output_dir,  # Orchestrator creates sub-directory
         cache_base_dir=os.getenv("APP_CACHE_BASE_DIR", ".cache/tts_cache"),  # Added

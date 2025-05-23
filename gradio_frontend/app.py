@@ -27,6 +27,7 @@ from dialogue_tts_core.config_models import (
     TTSJobStatusResponse,
     TTSRequestPayload,
 )
+from dialogue_tts_core.cost_router import QualityTier
 from dialogue_tts_core.dialogue_script_parser import parse_dialogue_script
 from dialogue_tts_core.speaker_config_resolver import (
     get_unique_speakers_from_parsed_script,
@@ -134,7 +135,6 @@ async def get_cache_statistics_endpoint() -> "CacheStatsResponse":
 async def run_tts_orchestration_task(
     job_id: str,
     parsed_script: list[dict],
-    tts_global_model: str,
     global_pause_ms: int,
     resolved_configs: dict[str, SpeakerTTSConfig],
     output_base_dir: str,
@@ -150,11 +150,20 @@ async def run_tts_orchestration_task(
 
     job_store[job_id]["status"] = "processing"
     try:
-        zip_path, merged_path, status_msg = await orchestrate_tts_synthesis(
+        (
+            zip_path,
+            merged_path,
+            status_msg,
+            all_lines_synthesis_details,
+        ) = await orchestrate_tts_synthesis(
             parsed_script=parsed_script,
-            tts_global_model=tts_global_model,
             global_pause_ms=global_pause_ms,
             resolved_speaker_configs_map=resolved_configs,
+            user_id=None,
+            desired_quality_tier=QualityTier.MID,
+            max_total_job_cost_usd=None,
+            prefer_low_latency_routing=False,
+            prefer_emotion_support_routing=False,
             openai_client=async_openai_client,
             output_directory=output_base_dir,
             cache_base_dir=cache_base_dir,
@@ -243,7 +252,6 @@ async def submit_tts_job_endpoint(
         run_tts_orchestration_task,
         job_id,
         parsed_script_lines,
-        payload.tts_global_model,
         effective_pause_ms,
         resolved_configs,
         job_output_base_dir,

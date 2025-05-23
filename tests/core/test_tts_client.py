@@ -172,8 +172,10 @@ async def test_synthesize_speech_line_empty_text(mocker: MagicMock) -> None:
         voice="alloy",
         output_path="output.mp3",
         line_index=1,
+        cache_base_dir="test_cache",
     )
-    assert result is None
+    assert result[0] is None
+    assert result[1] is False  # Not from cache
     mock_openai_client.audio.speech.create.assert_not_called()
     mock_print.assert_called_once()
     assert "Input text is empty. Skipping synthesis." in mock_print.call_args[0][0]
@@ -195,8 +197,10 @@ async def test_synthesize_speech_line_unsafe_content(mocker: MagicMock) -> None:
         output_path="output.mp3",
         nsfw_api_url_template="http://example.com/check?text={text}",
         line_index=2,
+        cache_base_dir="test_cache",
     )
-    assert result is None
+    assert result[0] is None
+    assert result[1] is False  # Not from cache
     mock_openai_client.audio.speech.create.assert_not_called()
     mock_print.assert_called_once()
     assert (
@@ -235,10 +239,10 @@ async def test_synthesize_speech_line_successful(mocker: MagicMock) -> None:
         voice="alloy",
         output_path=output_p,
         line_index=3,
+        cache_base_dir="test_cache",
     )  # Make sure line_index is passed if your function uses it for prints
-    assert (
-        result == output_p
-    )  # This should now pass if astream_to_file is awaited correctly
+    assert result[0] == output_p
+    assert result[1] is False  # Not from cache
     mock_openai_client.audio.speech.create.assert_called_once_with(
         model="tts-1-hd",  # Default model
         input="hello",
@@ -270,8 +274,10 @@ async def test_synthesize_speech_line_openai_error(mocker: MagicMock) -> None:
         voice="alloy",
         output_path="output.mp3",
         line_index=4,
+        cache_base_dir="test_cache",
     )
-    assert result is None
+    assert result[0] is None
+    assert result[1] is False  # Not from cache
     mock_openai_client.audio.speech.create.assert_called_once()
     mock_print.assert_called_once()
     assert "OpenAI API error during synthesis:" in mock_print.call_args[0][0]
@@ -315,8 +321,10 @@ async def test_synthesize_speech_line_rate_limit_then_success(
         voice="alloy",
         output_path=output_p,
         line_index=5,
+        cache_base_dir="test_cache",
     )
-    assert result == output_p
+    assert result[0] == output_p
+    assert result[1] is False  # Not from cache
     assert (
         mock_openai_client.audio.speech.create.call_count == 3
     )  # Initial call + 2 retries
@@ -355,8 +363,10 @@ async def test_synthesize_speech_line_max_retries_reached(mocker: MagicMock) -> 
         voice="alloy",
         output_path=output_p,
         line_index=6,
+        cache_base_dir="test_cache",
     )
-    assert result is None
+    assert result[0] is None
+    assert result[1] is False  # Not from cache
     assert mock_openai_client.audio.speech.create.call_count == MAX_RETRIES + 1
     assert mock_asyncio_sleep.call_count == MAX_RETRIES
     # Remove strict assert_called_once as print is called multiple times during retries
@@ -409,8 +419,10 @@ async def test_synthesize_speech_line_output_file_missing_or_empty(
         voice="alloy",
         output_path=output_p,
         line_index=7,
+        cache_base_dir="test_cache",
     )
-    assert result is None  # Because os.path.exists returns False
+    assert result[0] is None
+    assert result[1] is False  # Not from cache
     mock_openai_client.audio.speech.create.assert_called_once()
     # astream_to_file should still be called before the os.path.exists check
     mock_stream_response.astream_to_file.assert_awaited_once_with(output_p)
@@ -446,7 +458,7 @@ async def test_synthesize_speech_line_different_model_params(mocker: MagicMock) 
 
     output_p_1 = "test_model_params_1.mp3"
     # Test tts-1 with speed
-    await synthesize_speech_line(
+    path_1, was_cached_1 = await synthesize_speech_line(
         client=mock_openai_client,
         text="hello fast",
         voice="alloy",
@@ -454,7 +466,10 @@ async def test_synthesize_speech_line_different_model_params(mocker: MagicMock) 
         model="tts-1",
         speed=1.5,
         line_index=8,
+        cache_base_dir="test_cache",
     )
+    assert path_1 == output_p_1
+    assert was_cached_1 is False
     mock_openai_client.audio.speech.create.assert_called_with(
         model="tts-1",
         input="hello fast",
@@ -466,7 +481,7 @@ async def test_synthesize_speech_line_different_model_params(mocker: MagicMock) 
 
     output_p_2 = "test_model_params_2.mp3"
     # Test gpt-4o-mini-tts with instructions
-    await synthesize_speech_line(
+    path_2, was_cached_2 = await synthesize_speech_line(
         client=mock_openai_client,
         text="hello instructed",
         voice="alloy",
@@ -474,7 +489,10 @@ async def test_synthesize_speech_line_different_model_params(mocker: MagicMock) 
         model="gpt-4o-mini-tts",
         instructions="speak like a robot",
         line_index=9,
+        cache_base_dir="test_cache",
     )
+    assert path_2 == output_p_2
+    assert was_cached_2 is False
     mock_openai_client.audio.speech.create.assert_called_with(
         model="gpt-4o-mini-tts",
         input="hello instructed",
@@ -486,7 +504,7 @@ async def test_synthesize_speech_line_different_model_params(mocker: MagicMock) 
 
     output_p_3 = "test_model_params_3.mp3"
     # Test tts-1-hd with default speed (should not include speed param)
-    await synthesize_speech_line(
+    path_3, was_cached_3 = await synthesize_speech_line(
         client=mock_openai_client,
         text="hello default speed",
         voice="alloy",
@@ -494,7 +512,10 @@ async def test_synthesize_speech_line_different_model_params(mocker: MagicMock) 
         model="tts-1-hd",
         speed=1.0,
         line_index=10,
+        cache_base_dir="test_cache",
     )
+    assert path_3 == output_p_3
+    assert was_cached_3 is False
     mock_openai_client.audio.speech.create.assert_called_with(
         model="tts-1-hd",
         input="hello default speed",
@@ -506,7 +527,7 @@ async def test_synthesize_speech_line_different_model_params(mocker: MagicMock) 
 
     output_p_4 = "test_model_params_4.mp3"
     # Test tts-1-hd with instructions (should not include instructions param)
-    await synthesize_speech_line(
+    path_4, was_cached_4 = await synthesize_speech_line(
         client=mock_openai_client,
         text="hello no instructions",
         voice="alloy",
@@ -514,7 +535,10 @@ async def test_synthesize_speech_line_different_model_params(mocker: MagicMock) 
         model="tts-1-hd",
         instructions="speak like a robot",
         line_index=11,
+        cache_base_dir="test_cache",
     )
+    assert path_4 == output_p_4
+    assert was_cached_4 is False
     mock_openai_client.audio.speech.create.assert_called_with(
         model="tts-1-hd",
         input="hello no instructions",

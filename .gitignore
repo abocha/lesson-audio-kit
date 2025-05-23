@@ -11,5 +11,5 @@ venv/
 !/tmp/.gitkeep
 *.log
 
-# TTS Audio Cache
 .cache/tts_cache/
+.job_outputs/
