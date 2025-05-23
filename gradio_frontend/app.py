@@ -27,7 +27,6 @@ from dialogue_tts_core.config_models import (
     TTSJobStatusResponse,
     TTSRequestPayload,
 )
-from dialogue_tts_core.cost_router import QualityTier
 from dialogue_tts_core.dialogue_script_parser import parse_dialogue_script
 from dialogue_tts_core.speaker_config_resolver import (
     get_unique_speakers_from_parsed_script,
@@ -297,11 +296,7 @@ async def submit_tts_job_endpoint(
         global_pause_ms=effective_pause_ms,
         output_dir=job_output_base_dir,
         user_id=payload.user_id,
-        desired_quality_tier_str=(
-            payload.desired_quality_tier
-            if payload.desired_quality_tier
-            else QualityTier.MID.name
-        ),
+        desired_quality_tier_str=payload.desired_quality_tier,
         max_total_job_cost_usd=payload.max_total_job_cost_usd,
         prefer_low_latency=prefer_low_latency,
         prefer_emotion_support=prefer_emotion_support,

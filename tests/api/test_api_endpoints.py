@@ -110,6 +110,125 @@ def test_submit_tts_job_valid_payload(
     assert job_store[data["job_id"]]["status"] == "pending"
 
 
+def test_submit_tts_job_with_routing_parameters_full(
+    _mock_core_services: Any, mock_background_tasks: MagicMock
+) -> None:
+    """Test TTS job submission with all routing parameters."""
+    payload_with_routing = TTSRequestPayload(
+        script_text="Speaker1: Hello world with routing.",
+        tts_global_model="tts-1",
+        speaker_config_method="global",
+        global_speaker_config=SpeakerTTSConfig(voice="alloy"),
+        user_id="test_user_123",
+        desired_quality_tier="premium",
+        max_total_job_cost_usd=0.5,
+        prefer_low_latency=True,
+        prefer_emotion_support=True,
+        prefer_voice_cloning=True,
+        specific_engine_id="engine_xyz",
+    )
+    response = client.post("/api/tts", json=payload_with_routing.model_dump())
+
+    assert response.status_code == 202
+    data = response.json()
+    assert "job_id" in data
+
+    mock_background_tasks.assert_called_once()
+    called_args, called_kwargs = mock_background_tasks.call_args
+    assert called_args[0][0] == run_tts_orchestration_task
+    assert called_kwargs.get("user_id") == payload_with_routing.user_id
+    assert (
+        called_kwargs.get("desired_quality_tier_str")
+        == payload_with_routing.desired_quality_tier
+    )
+    assert (
+        called_kwargs.get("max_total_job_cost_usd")
+        == payload_with_routing.max_total_job_cost_usd
+    )
+    assert (
+        called_kwargs.get("prefer_low_latency")
+        == payload_with_routing.prefer_low_latency
+    )
+    assert (
+        called_kwargs.get("prefer_emotion_support")
+        == payload_with_routing.prefer_emotion_support
+    )
+    assert (
+        called_kwargs.get("prefer_voice_cloning")
+        == payload_with_routing.prefer_voice_cloning
+    )
+    assert (
+        called_kwargs.get("specific_engine_id")
+        == payload_with_routing.specific_engine_id
+    )
+
+
+def test_submit_tts_job_with_routing_parameters_partial(
+    _mock_core_services: Any, mock_background_tasks: MagicMock
+) -> None:
+    """Test TTS job submission with a subset of routing parameters."""
+    payload_with_routing = TTSRequestPayload(
+        script_text="Speaker1: Hello world with partial routing.",
+        tts_global_model="tts-1",
+        speaker_config_method="global",
+        global_speaker_config=SpeakerTTSConfig(voice="alloy"),
+        user_id="partial_user",
+        prefer_low_latency=True,
+        specific_engine_id="engine_abc",
+    )
+    response = client.post("/api/tts", json=payload_with_routing.model_dump())
+
+    assert response.status_code == 202
+    data = response.json()
+    assert "job_id" in data
+
+    mock_background_tasks.assert_called_once()
+    called_args, called_kwargs = mock_background_tasks.call_args
+    assert called_args[0][0] == run_tts_orchestration_task
+    assert called_kwargs.get("user_id") == payload_with_routing.user_id
+    assert called_kwargs.get("desired_quality_tier_str") is None  # Not provided
+    assert called_kwargs.get("max_total_job_cost_usd") is None  # Not provided
+    assert (
+        called_kwargs.get("prefer_low_latency")
+        == payload_with_routing.prefer_low_latency
+    )
+    assert called_kwargs.get("prefer_emotion_support") is False  # Default value
+    assert called_kwargs.get("prefer_voice_cloning") is False  # Default value
+    assert (
+        called_kwargs.get("specific_engine_id")
+        == payload_with_routing.specific_engine_id
+    )
+
+
+def test_submit_tts_job_with_routing_parameters_defaults(
+    _mock_core_services: Any, mock_background_tasks: MagicMock
+) -> None:
+    """Test TTS job submission with routing parameters relying on defaults."""
+    payload_with_routing = TTSRequestPayload(
+        script_text="Speaker1: Hello world with default routing.",
+        tts_global_model="tts-1",
+        speaker_config_method="global",
+        global_speaker_config=SpeakerTTSConfig(voice="alloy"),
+        # No routing parameters explicitly set
+    )
+    response = client.post("/api/tts", json=payload_with_routing.model_dump())
+
+    assert response.status_code == 202
+    data = response.json()
+    assert "job_id" in data
+
+    mock_background_tasks.assert_called_once()
+    called_args, called_kwargs = mock_background_tasks.call_args
+    assert called_args[0][0] == run_tts_orchestration_task
+    assert called_kwargs.get("user_id") is None
+    assert called_kwargs.get("desired_quality_tier_str") is None
+    assert called_kwargs.get("max_total_job_cost_usd") is None
+    assert called_kwargs.get("prefer_low_latency") is False
+    assert called_kwargs.get("prefer_emotion_support") is False
+    assert called_kwargs.get("prefer_voice_cloning") is False
+    assert called_kwargs.get("specific_engine_id") is None
+
+
 def test_submit_tts_job_invalid_payload_missing_field() -> None:
     """Test invalid TTS job submission with missing required field."""
     payload = {
