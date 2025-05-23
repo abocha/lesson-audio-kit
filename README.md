@@ -71,6 +71,38 @@ A modular application for generating educational lesson content and converting i
   pytest
   ```
 
+### Live API Testing (VCR Cassette Recording)
+
+Tests that interact with the live OpenAI API (e.g., for recording VCR cassettes) are marked with `@pytest.mark.live`.
+
+To run these tests in CI in a way that records new cassettes (e.g., on your fork if you've made changes requiring new recordings), you will need to add an `OPENAI_API_KEY` secret to your GitHub repository settings:
+
+1. Go to your forked repository on GitHub.
+2. Navigate to `Settings` > `Secrets and variables` > `Actions`.
+3. Click `New repository secret`.
+4. Name: `OPENAI_API_KEY`
+5. Value: Your actual OpenAI API key.
+
+Without this secret, CI will use existing cassettes or skip these tests if cassettes are missing and `OPENAI_API_KEY` is not set in the environment.
+
+#### Running Live API Tests Locally
+
+To run tests that hit the live OpenAI API locally (e.g., to record new VCR cassettes or debug live interactions), you can use the provided script. This script retrieves your OpenAI API key from 1Password (ensure `op` CLI is configured and you have access to the specified secret path `op://personal/openai/key`).
+
+1. Make the script executable:
+
+    ```bash
+    chmod +x scripts/run_tests_live.sh
+    ```
+
+2. Run the script from the project root:
+
+    ```bash
+    ./scripts/run_tests_live.sh
+    ```
+
+This will set the `OPENAI_API_KEY` environment variable for the session and run `pytest tests/core/test_tts_client.py -m "live"`.
+
 ## TODO
 
 - Implement Streamlit frontend.

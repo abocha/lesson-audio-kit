@@ -1,4 +1,7 @@
-from typing import Any
+from collections.abc import AsyncGenerator  # Added AsyncGenerator for type hint
+import os  # Added for VCR test
+from pathlib import Path  # Added for type hint
+from typing import Optional
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -6,6 +9,7 @@ from openai import AsyncOpenAI, OpenAIError, RateLimitError
 
 # from openai._response import AsyncAPIResponse  # No longer needed, Stream is used
 import pytest
+import vcr  # Add this import
 
 from dialogue_tts_core.tts_client import (
     INITIAL_BACKOFF_SECONDS,
@@ -13,6 +17,80 @@ from dialogue_tts_core.tts_client import (
     is_content_safe,
     synthesize_speech_line,
 )
+
+try:
+    from gradio_frontend.app import async_openai_client as global_app_openai_client
+except ImportError:
+    # Define global_app_openai_client as None if import fails or it's not there
+    global_app_openai_client: Optional[AsyncOpenAI] = None
+
+
+@pytest.fixture
+async def real_openai_client() -> AsyncGenerator[AsyncOpenAI, None]:
+    """
+    Provides a real AsyncOpenAI client for VCR recording.
+    Uses the global client from gradio_frontend.app if available and configured,
+    otherwise creates a new one using OPENAI_API_KEY.
+    Manages the lifecycle of locally created clients.
+    """
+    client_instance: Optional[AsyncOpenAI] = None
+    is_externally_managed = (
+        False  # Flag to track if client is from global_app_openai_client
+    )
+
+    if (
+        global_app_openai_client is not None
+    ):  # Check if the global client exists and is not None
+        client_instance = global_app_openai_client
+        is_externally_managed = True
+        # We assume an externally managed client is already configured and active.
+    else:
+        # Global client is not available or is None, try creating one
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            pytest.skip(
+                "OPENAI_API_KEY not set and no global client available, "
+                "skipping VCR recording-dependent test."
+            )
+        # Create a new client instance for the test
+        client_instance = AsyncOpenAI(api_key=api_key)
+        is_externally_managed = False
+
+    if client_instance is None:
+        # This state should ideally be prevented by the pytest.skip above.
+        raise RuntimeError(
+            "Failed to obtain an OpenAI client instance for the test, "
+            "and pytest.skip was not triggered."
+        )
+
+    # Add a test API call to verify connectivity and API key validity
+    try:
+        # Attempt a simple, low-cost API call to verify connectivity
+        # For example, listing models is a good way to check
+        await client_instance.models.list()
+    except (OpenAIError, httpx.RequestError) as e:  # Catch specific, relevant errors
+        # If this client was created using an API key by this fixture,
+        # and it fails, skip.
+        if not is_externally_managed:
+            pytest.skip(
+                "Skipping VCR test: OpenAI API connectivity/authentication "
+                f"error with locally created client: {type(e).__name__} - {e}"
+            )
+        else:
+            error_type_name = type(e).__name__
+            warning_message = (
+                "Warning: Externally managed OpenAI client failed connectivity "
+                f"check: {error_type_name} - {e}"
+            )
+            print(warning_message)
+
+    try:
+        yield client_instance  # Yield the actual client instance
+    finally:
+        # Only close the client if it was created by this fixture
+        if not is_externally_managed and client_instance:
+            await client_instance.close()
+
 
 # The global semaphore is not directly tested here, so the fixture is not
 # needed for these tests.
@@ -213,18 +291,20 @@ async def test_synthesize_speech_line_unsafe_content(mocker: MagicMock) -> None:
 async def test_synthesize_speech_line_successful(mocker: MagicMock) -> None:
     """Test successful speech synthesis."""
     mock_openai_client = AsyncMock(spec=AsyncOpenAI)
-    # Mock the response object returned by create
-    # This is the object returned by client.audio.speech.create()
-    mock_stream_response = AsyncMock()
+    # This is the mock for the response object yielded by the context manager
+    mock_streaming_api_response = AsyncMock()
+    mock_streaming_api_response.status_code = 200
+    mock_streaming_api_response.stream_to_file = AsyncMock()
 
-    async def _mock_astream_to_file_successful(*_args: Any, **_kwargs: Any) -> None:
-        return None
+    # This is the mock for the context manager itself
+    mock_streaming_context_manager = AsyncMock()
+    mock_streaming_context_manager.__aenter__.return_value = mock_streaming_api_response
+    mock_streaming_context_manager.__aexit__ = AsyncMock(return_value=None)
 
-    mock_stream_response.astream_to_file = AsyncMock(
-        side_effect=_mock_astream_to_file_successful
+    # Configure the client to return this context manager
+    mock_openai_client.audio.speech.with_streaming_response.create.return_value = (
+        mock_streaming_context_manager
     )
-
-    mock_openai_client.audio.speech.create.return_value = mock_stream_response
 
     mocker.patch(
         "dialogue_tts_core.tts_client.is_content_safe", AsyncMock(return_value=True)
@@ -243,13 +323,13 @@ async def test_synthesize_speech_line_successful(mocker: MagicMock) -> None:
     )  # Make sure line_index is passed if your function uses it for prints
     assert result[0] == output_p
     assert result[1] is False  # Not from cache
-    mock_openai_client.audio.speech.create.assert_called_once_with(
+    mock_openai_client.audio.speech.with_streaming_response.create.assert_called_once_with(
         model="tts-1-hd",  # Default model
         input="hello",
         voice="alloy",
         response_format="mp3",
     )
-    mock_stream_response.astream_to_file.assert_awaited_once_with(output_p)
+    mock_streaming_api_response.stream_to_file.assert_awaited_once_with(output_p)
 
 
 @pytest.mark.asyncio
@@ -257,10 +337,10 @@ async def test_synthesize_speech_line_openai_error(mocker: MagicMock) -> None:
     """Test synthesize_speech_line returns None on OpenAI API error
     (not RateLimitError)."""
     mock_openai_client = AsyncMock(spec=AsyncOpenAI)
-    # OpenAIError constructor does not accept response or body in this
-    # version
-    mock_openai_client.audio.speech.create.side_effect = OpenAIError(
-        "Some OpenAI error",
+    mock_openai_client.audio.speech.with_streaming_response.create.side_effect = (
+        OpenAIError(
+            "Some OpenAI error",
+        )
     )
 
     mocker.patch(
@@ -278,7 +358,7 @@ async def test_synthesize_speech_line_openai_error(mocker: MagicMock) -> None:
     )
     assert result[0] is None
     assert result[1] is False  # Not from cache
-    mock_openai_client.audio.speech.create.assert_called_once()
+    mock_openai_client.audio.speech.with_streaming_response.create.assert_called_once()
     mock_print.assert_called_once()
     assert "OpenAI API error during synthesis:" in mock_print.call_args[0][0]
 
@@ -290,22 +370,23 @@ async def test_synthesize_speech_line_rate_limit_then_success(
     """Test synthesize_speech_line retries on RateLimitError and succeeds."""
     mock_openai_client = AsyncMock(spec=AsyncOpenAI)
     # Mock the response object returned by create
-    mock_stream_response_success = AsyncMock()
+    # This is the mock for the response object yielded by the context manager
+    mock_streaming_api_response = AsyncMock()
+    mock_streaming_api_response.status_code = 200
+    mock_streaming_api_response.stream_to_file = AsyncMock()
 
-    async def _mock_astream_to_file_rate_limit(*_args: Any, **_kwargs: Any) -> None:
-        return None
-
-    mock_stream_response_success.astream_to_file = AsyncMock(
-        side_effect=_mock_astream_to_file_rate_limit
-    )
+    # This is the mock for the context manager itself
+    mock_streaming_context_manager = AsyncMock()
+    mock_streaming_context_manager.__aenter__.return_value = mock_streaming_api_response
+    mock_streaming_context_manager.__aexit__ = AsyncMock(return_value=None)
 
     # Simulate RateLimitError twice, then success
-    mock_openai_client.audio.speech.create.side_effect = [
+    mock_openai_client.audio.speech.with_streaming_response.create.side_effect = [
         RateLimitError(
             "rate limited 1", response=MagicMock(), body=None
         ),  # Keep response/body for RateLimitError as it might be different
         RateLimitError("rate limited 2", response=MagicMock(), body=None),
-        mock_stream_response_success,  # This is the successful response
+        mock_streaming_context_manager,  # This is the successful response
     ]
     mock_asyncio_sleep = mocker.patch("asyncio.sleep", AsyncMock())
     mocker.patch(
@@ -326,14 +407,14 @@ async def test_synthesize_speech_line_rate_limit_then_success(
     assert result[0] == output_p
     assert result[1] is False  # Not from cache
     assert (
-        mock_openai_client.audio.speech.create.call_count == 3
+        mock_openai_client.audio.speech.with_streaming_response.create.call_count == 3
     )  # Initial call + 2 retries
     assert mock_asyncio_sleep.call_count == 2
     # Check sleep durations (approximate due to min/max logic)
     call_args = mock_asyncio_sleep.call_args_list
     assert call_args[0].args[0] >= INITIAL_BACKOFF_SECONDS
     assert call_args[1].args[0] >= INITIAL_BACKOFF_SECONDS * 2
-    mock_stream_response_success.astream_to_file.assert_awaited_once_with(
+    mock_streaming_api_response.stream_to_file.assert_awaited_once_with(
         output_p
     )  # Check on the correct mock
 
@@ -348,7 +429,9 @@ async def test_synthesize_speech_line_max_retries_reached(mocker: MagicMock) -> 
         RateLimitError(f"rate limited {i + 1}", response=MagicMock(), body=None)
         for i in range(MAX_RETRIES + 1)
     ]
-    mock_openai_client.audio.speech.create.side_effect = side_effects
+    mock_openai_client.audio.speech.with_streaming_response.create.side_effect = (
+        side_effects
+    )
 
     mock_asyncio_sleep = mocker.patch("asyncio.sleep", AsyncMock())
     mocker.patch(
@@ -367,7 +450,10 @@ async def test_synthesize_speech_line_max_retries_reached(mocker: MagicMock) -> 
     )
     assert result[0] is None
     assert result[1] is False  # Not from cache
-    assert mock_openai_client.audio.speech.create.call_count == MAX_RETRIES + 1
+    assert (
+        mock_openai_client.audio.speech.with_streaming_response.create.call_count
+        == MAX_RETRIES + 1
+    )
     assert mock_asyncio_sleep.call_count == MAX_RETRIES
     # Remove strict assert_called_once as print is called multiple times during retries
     # assert "Max retries reached due to RateLimitError." in mock_print.call_args[0][0]
@@ -388,16 +474,20 @@ async def test_synthesize_speech_line_output_file_missing_or_empty(
     """Test synthesize_speech_line returns None if output file is missing or empty."""
     mock_openai_client = AsyncMock(spec=AsyncOpenAI)
     # Mock the response object returned by create
-    mock_stream_response = AsyncMock()
+    # This is the mock for the response object yielded by the context manager
+    mock_streaming_api_response = AsyncMock()
+    mock_streaming_api_response.status_code = 200
+    mock_streaming_api_response.stream_to_file = AsyncMock()
 
-    async def _mock_astream_to_file_missing(*_args: Any, **_kwargs: Any) -> None:
-        return None
+    # This is the mock for the context manager itself
+    mock_streaming_context_manager = AsyncMock()
+    mock_streaming_context_manager.__aenter__.return_value = mock_streaming_api_response
+    mock_streaming_context_manager.__aexit__ = AsyncMock(return_value=None)
 
-    mock_stream_response.astream_to_file = AsyncMock(
-        side_effect=_mock_astream_to_file_missing
+    # Configure the client to return this context manager
+    mock_openai_client.audio.speech.with_streaming_response.create.return_value = (
+        mock_streaming_context_manager
     )
-
-    mock_openai_client.audio.speech.create.return_value = mock_stream_response
 
     mocker.patch(
         "dialogue_tts_core.tts_client.is_content_safe", AsyncMock(return_value=True)
@@ -423,9 +513,9 @@ async def test_synthesize_speech_line_output_file_missing_or_empty(
     )
     assert result[0] is None
     assert result[1] is False  # Not from cache
-    mock_openai_client.audio.speech.create.assert_called_once()
+    mock_openai_client.audio.speech.with_streaming_response.create.assert_called_once()
     # astream_to_file should still be called before the os.path.exists check
-    mock_stream_response.astream_to_file.assert_awaited_once_with(output_p)
+    mock_streaming_api_response.stream_to_file.assert_awaited_once_with(output_p)
     mock_print.assert_called_once()
     assert (
         "Synthesis appeared to succeed but output file is missing or empty:"
@@ -438,17 +528,20 @@ async def test_synthesize_speech_line_different_model_params(mocker: MagicMock) 
     """Test synthesize_speech_line handles different model parameters (speed,
     instructions)."""
     mock_openai_client = AsyncMock(spec=AsyncOpenAI)
-    # Mock the response object returned by create
-    mock_stream_response = AsyncMock()
+    # This is the mock for the response object yielded by the context manager
+    mock_streaming_api_response = AsyncMock()
+    mock_streaming_api_response.status_code = 200
+    mock_streaming_api_response.stream_to_file = AsyncMock()
 
-    async def _mock_astream_to_file_params(*_args: Any, **_kwargs: Any) -> None:
-        return None
+    # This is the mock for the context manager itself
+    mock_streaming_context_manager = AsyncMock()
+    mock_streaming_context_manager.__aenter__.return_value = mock_streaming_api_response
+    mock_streaming_context_manager.__aexit__ = AsyncMock(return_value=None)
 
-    mock_stream_response.astream_to_file = AsyncMock(
-        side_effect=_mock_astream_to_file_params
+    # Configure the client to return this context manager
+    mock_openai_client.audio.speech.with_streaming_response.create.return_value = (
+        mock_streaming_context_manager
     )
-
-    mock_openai_client.audio.speech.create.return_value = mock_stream_response
 
     mocker.patch(
         "dialogue_tts_core.tts_client.is_content_safe", AsyncMock(return_value=True)
@@ -470,14 +563,14 @@ async def test_synthesize_speech_line_different_model_params(mocker: MagicMock) 
     )
     assert path_1 == output_p_1
     assert was_cached_1 is False
-    mock_openai_client.audio.speech.create.assert_called_with(
+    mock_openai_client.audio.speech.with_streaming_response.create.assert_called_with(
         model="tts-1",
         input="hello fast",
         voice="alloy",
         response_format="mp3",
         speed=1.5,
     )
-    mock_stream_response.astream_to_file.assert_awaited_with(output_p_1)
+    mock_streaming_api_response.stream_to_file.assert_awaited_with(output_p_1)
 
     output_p_2 = "test_model_params_2.mp3"
     # Test gpt-4o-mini-tts with instructions
@@ -493,14 +586,14 @@ async def test_synthesize_speech_line_different_model_params(mocker: MagicMock) 
     )
     assert path_2 == output_p_2
     assert was_cached_2 is False
-    mock_openai_client.audio.speech.create.assert_called_with(
+    mock_openai_client.audio.speech.with_streaming_response.create.assert_called_with(
         model="gpt-4o-mini-tts",
         input="hello instructed",
         voice="alloy",
         response_format="mp3",
         instructions="speak like a robot",
     )
-    mock_stream_response.astream_to_file.assert_awaited_with(output_p_2)
+    mock_streaming_api_response.stream_to_file.assert_awaited_with(output_p_2)
 
     output_p_3 = "test_model_params_3.mp3"
     # Test tts-1-hd with default speed (should not include speed param)
@@ -516,14 +609,14 @@ async def test_synthesize_speech_line_different_model_params(mocker: MagicMock) 
     )
     assert path_3 == output_p_3
     assert was_cached_3 is False
-    mock_openai_client.audio.speech.create.assert_called_with(
+    mock_openai_client.audio.speech.with_streaming_response.create.assert_called_with(
         model="tts-1-hd",
         input="hello default speed",
         voice="alloy",
         response_format="mp3",
         # speed=1.0 should NOT be present
     )
-    mock_stream_response.astream_to_file.assert_awaited_with(output_p_3)
+    mock_streaming_api_response.stream_to_file.assert_awaited_with(output_p_3)
 
     output_p_4 = "test_model_params_4.mp3"
     # Test tts-1-hd with instructions (should not include instructions param)
@@ -539,11 +632,78 @@ async def test_synthesize_speech_line_different_model_params(mocker: MagicMock) 
     )
     assert path_4 == output_p_4
     assert was_cached_4 is False
-    mock_openai_client.audio.speech.create.assert_called_with(
+    mock_openai_client.audio.speech.with_streaming_response.create.assert_called_with(
         model="tts-1-hd",
         input="hello no instructions",
         voice="alloy",
         response_format="mp3",
         # instructions should NOT be present
     )
-    mock_stream_response.astream_to_file.assert_awaited_with(output_p_4)
+    mock_streaming_api_response.stream_to_file.assert_awaited_with(output_p_4)
+
+
+@pytest.mark.asyncio
+@pytest.mark.live  # Add this marker
+async def test_synthesize_speech_line_successful_with_vcr(
+    real_openai_client: AsyncOpenAI,  # This fixture provides a live, configured client
+    tmp_path: Path,  # Pytest fixture for temporary directory
+) -> None:
+    # Ensure a clean cache state for this specific test
+    # to force an API call during recording
+    test_cache_dir = tmp_path / "test_vcr_cache"
+    test_cache_dir.mkdir()
+
+    output_file = tmp_path / "output_vcr.mp3"
+    text_to_synthesize = "Hello VCR world from OpenAI"
+
+    record_mode = "once" if os.getenv("OPENAI_API_KEY") else "none"
+
+    # Define the cassette path.
+    # Ensure the 'tests/cassettes' directory exists or will be created.
+    # VCRpy usually creates the directory if it doesn't exist.
+    cassette_path = "tests/cassettes/test_tts_client_vcr.yaml"
+
+    # Configure VCR
+    my_vcr = vcr.VCR(
+        cassette_library_dir="tests/cassettes/",  # Optional: if you want to group them
+        filter_headers=[("Authorization", "DUMMY")],
+        # record_mode will be passed when using the cassette
+    )
+
+    # Use the VCR instance as a context manager
+    with my_vcr.use_cassette(cassette_path, record_mode=record_mode):
+        path, was_cache_hit_1 = await synthesize_speech_line(
+            client=real_openai_client,
+            text=text_to_synthesize,
+            voice="alloy",
+            output_path=str(output_file),
+            cache_base_dir=str(test_cache_dir),
+            model="tts-1",
+            speed=1.0,
+            instructions=None,
+        )
+
+        assert path == str(output_file)
+        assert path is not None  # Ensure path is not None for type checking
+        assert os.path.exists(path)
+        assert os.path.getsize(path) > 0
+        assert was_cache_hit_1 is False
+
+        output_file_2 = tmp_path / "output_vcr_cached.mp3"
+        path_cached, was_cache_hit_2 = await synthesize_speech_line(
+            client=real_openai_client,
+            text=text_to_synthesize,
+            voice="alloy",
+            output_path=str(output_file_2),
+            cache_base_dir=str(test_cache_dir),
+            model="tts-1",
+            speed=1.0,
+            instructions=None,
+        )
+        assert path_cached == str(output_file_2)
+        assert (
+            path_cached is not None
+        )  # Ensure path_cached is not None for type checking
+        assert os.path.exists(path_cached)
+        assert os.path.getsize(path_cached) > 0
+        assert was_cache_hit_2 is True

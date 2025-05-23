@@ -26,7 +26,7 @@ streamlit = "^1.45.1"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.2.0"
-pytest-vcr = "^1.0.2"
+pytest-recording = "^0.13.0"
 ruff = "^0.9.3"
 black = "^24.4.2"
 pre-commit = "^3.8.0"
@@ -60,6 +60,10 @@ force-sort-within-sections = true
 [tool.pytest.ini_options]
 filterwarnings = [
     "ignore::DeprecationWarning:websockets.legacy.*",
+]
+asyncio_mode = "auto"
+markers = [
+    "live: marks tests that require a live OpenAI API connection (for VCR recording or direct testing)",
 ]
 
 [tool.ruff.format]

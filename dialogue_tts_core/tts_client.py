@@ -184,11 +184,19 @@ async def synthesize_speech_line(  # noqa: C901
                 if model == "gpt-4o-mini-tts" and instructions and instructions.strip():
                     request_params["instructions"] = instructions.strip()
 
-                response_or_coro = client.audio.speech.create(**request_params)
-                response = await maybe_await(response_or_coro)
+                async with client.audio.speech.with_streaming_response.create(
+                    **request_params
+                ) as response:
+                    if response.status_code != 200:
+                        error_content = await response.text()
+                        print(
+                            f"Line {line_index if line_index is not None else 'N/A'}: "
+                            f"OpenAI API error during synthesis (streaming): "
+                            f"{response.status_code} - {error_content}"
+                        )
+                        return None, False
 
-                to_file = response.astream_to_file(output_path)
-                await maybe_await(to_file)
+                    await response.stream_to_file(output_path)
 
                 if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                     print(
