@@ -1,28 +1,40 @@
 # FILE: app.py
+import asyncio
+from functools import partial
 import os
 import sys
+from typing import Any, Optional
+import uuid
 
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
-import os  # noqa: E402
+from dotenv import load_dotenv
+from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
+import gradio as gr
+from openai import AsyncOpenAI
 
-from dotenv import load_dotenv  # noqa: E402
-from fastapi import FastAPI, HTTPException  # noqa: E402
-import gradio as gr  # noqa: E402
-
-from dialogue_tts_core.cache_manager import (  # noqa: E402
+from dialogue_tts_core.cache_manager import (
     get_cache_stats,
     get_current_cache_size_bytes,
 )
-from dialogue_tts_core.config_models import CacheStatsResponse  # noqa: E402
-from dialogue_tts_core.dialogue_script_parser import parse_dialogue_script  # noqa: E402
+from dialogue_tts_core.config_models import (
+    CacheStatsResponse,
+    SpeakerTTSConfig,
+    TTSJobCreationResponse,
+    TTSJobOutputs,
+    TTSJobStatusCompleted,
+    TTSJobStatusFailed,
+    TTSJobStatusPending,
+    TTSJobStatusResponse,
+    TTSRequestPayload,
+)
+from dialogue_tts_core.dialogue_script_parser import parse_dialogue_script
+from dialogue_tts_core.speaker_config_resolver import (
+    get_unique_speakers_from_parsed_script,
+    resolve_speaker_configurations,
+)
+from dialogue_tts_core.tts_orchestrator import orchestrate_tts_synthesis
 
-load_dotenv()
-import asyncio  # noqa: E402
-from functools import partial  # noqa: E402
-
-from event_handlers import (  # noqa: E402
+from .event_handlers import (
     get_speakers_from_script,
     handle_calculate_cost,
     handle_dynamic_accordion_input_change,
@@ -31,20 +43,26 @@ from event_handlers import (  # noqa: E402
     handle_speaker_config_method_visibility_change,
     handle_tts_model_change,
 )
-from openai import AsyncOpenAI  # noqa: E402
-
-# Remove create_examples_ui from ui_layout imports if it's not used elsewhere
-from ui_layout import (  # noqa: E402
+from .ui_layout import (
     APP_AVAILABLE_VOICES,
     DEFAULT_GLOBAL_VOICE,
     DEFAULT_VIBE,
     MODEL_DEFAULT_ENV,
     TTS_MODELS_AVAILABLE,
     VIBE_CHOICES,
-    create_action_and_output_components,  # Removed create_examples_ui
+    create_action_and_output_components,
     create_main_input_components,
     create_speaker_config_components,
 )
+
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+load_dotenv()
+
+# --- In-memory store for job statuses and results (for simplicity in v0) ---
+job_store: dict[str, dict[str, Any]] = {}
 
 # --- Secrets and Client Setup (Same as before) ---
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -84,13 +102,10 @@ async def get_cache_statistics_endpoint() -> "CacheStatsResponse":
         cache_base_dir_env = ".cache/tts_cache"
 
     max_cache_size_gb_env = os.getenv("APP_MAX_CACHE_SIZE_GB", "2.0")
+    max_cache_size_gb_config = 2.0
     try:
         max_cache_size_gb_config = float(max_cache_size_gb_env)
     except ValueError:
-        print(
-            f"Warning: Invalid APP_MAX_CACHE_SIZE_GB value "
-            f"'{max_cache_size_gb_env}'. Using default 2.0 GB."
-        )
         max_cache_size_gb_config = 2.0
 
     operational_stats = get_cache_stats()
@@ -113,6 +128,187 @@ async def get_cache_statistics_endpoint() -> "CacheStatsResponse":
         errors=operational_stats["errors"],
         total_lookups=operational_stats["total_lookups"],
     )
+
+
+# --- Helper function to run the orchestration in background ---
+async def run_tts_orchestration_task(
+    job_id: str,
+    parsed_script: list[dict],
+    tts_global_model: str,
+    global_pause_ms: int,
+    resolved_configs: dict[str, SpeakerTTSConfig],
+    output_base_dir: str,
+    cache_base_dir: str,
+    nsfw_template: Optional[str],
+) -> None:
+    global job_store, async_openai_client
+    if async_openai_client is None:
+        job_store[job_id].update(
+            {"status": "failed", "error_message": "OpenAI client not initialized."}
+        )
+        return
+
+    job_store[job_id]["status"] = "processing"
+    try:
+        zip_path, merged_path, status_msg = await orchestrate_tts_synthesis(
+            parsed_script=parsed_script,
+            tts_global_model=tts_global_model,
+            global_pause_ms=global_pause_ms,
+            resolved_speaker_configs_map=resolved_configs,
+            openai_client=async_openai_client,
+            output_directory=output_base_dir,
+            cache_base_dir=cache_base_dir,
+            nsfw_api_url_template=nsfw_template,
+        )
+
+        job_store[job_id].update(
+            {
+                "status": "completed",
+                "message": status_msg,
+                "outputs": {
+                    "zip_file_local_path": str(zip_path) if zip_path else None,
+                    "merged_mp3_local_path": str(merged_path) if merged_path else None,
+                },
+            }
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"Error in TTS orchestration task for job {job_id}: {e!s}")
+        job_store[job_id].update(
+            {"status": "failed", "error_message": f"Orchestration error: {e!s}"}
+        )
+
+
+@app.post(
+    "/api/tts", response_model=TTSJobCreationResponse, status_code=202, tags=["TTS"]
+)
+async def submit_tts_job_endpoint(
+    payload: TTSRequestPayload, background_tasks: BackgroundTasks
+) -> TTSJobCreationResponse:
+    global job_store, async_openai_client
+
+    if async_openai_client is None:
+        raise HTTPException(
+            status_code=503,
+            detail="TTS service not available: OpenAI client not initialized.",
+        )
+
+    try:
+        parsed_script_lines, _ = parse_dialogue_script(payload.script_text)
+        if not parsed_script_lines:
+            raise HTTPException(
+                status_code=400,
+                detail="Script is empty or contains no processable lines.",
+            )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=422, detail=f"Script parsing error: {e!s}"
+        ) from e
+
+    unique_speakers = get_unique_speakers_from_parsed_script(parsed_script_lines)
+    if not unique_speakers:
+        raise HTTPException(status_code=400, detail="No speakers found in the script.")
+
+    try:
+        resolved_configs = resolve_speaker_configurations(payload, unique_speakers)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=422, detail=f"Speaker configuration resolution error: {e!s}"
+        ) from e
+    except RuntimeError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error during config resolution: {e!s}",
+        ) from e
+
+    job_id = uuid.uuid4().hex
+
+    job_output_base_dir = os.getenv("APP_JOB_OUTPUT_DIR", ".job_outputs")
+    os.makedirs(job_output_base_dir, exist_ok=True)
+
+    cache_base_dir = os.getenv("APP_CACHE_BASE_DIR", ".cache/tts_cache")
+    os.makedirs(cache_base_dir, exist_ok=True)
+
+    nsfw_template = (
+        payload.nsfw_check_options.api_url_template
+        if payload.nsfw_check_options and payload.nsfw_check_options.enabled
+        else None
+    )
+    effective_pause_ms = (
+        payload.global_pause_ms if payload.global_pause_ms is not None else 500
+    )
+
+    job_store[job_id] = {"status": "pending", "request_payload": payload.model_dump()}
+
+    background_tasks.add_task(
+        run_tts_orchestration_task,
+        job_id,
+        parsed_script_lines,
+        payload.tts_global_model,
+        effective_pause_ms,
+        resolved_configs,
+        job_output_base_dir,
+        cache_base_dir,
+        nsfw_template,
+    )
+
+    status_url = f"/api/tts/status/{job_id}"
+
+    return TTSJobCreationResponse(job_id=job_id, status_url=status_url)
+
+
+# --- Endpoint for GET /api/tts/status/{job_id} ---
+@app.get("/api/tts/status/{job_id}", response_model=TTSJobStatusResponse, tags=["TTS"])
+async def get_tts_job_status_endpoint(job_id: str) -> TTSJobStatusResponse:
+    global job_store
+    job_info = job_store.get(job_id)
+
+    if not job_info:
+        raise HTTPException(status_code=404, detail="Job ID not found.")
+
+    status = job_info.get("status")
+
+    def make_file_url(local_path: Optional[str], job_id_for_url: str) -> Optional[str]:
+        if local_path and os.path.exists(local_path):
+            file_name = os.path.basename(local_path)
+            return f"/job_files/{job_id_for_url}/{file_name}"
+        return None
+
+    if status == "completed":
+        outputs_data = job_info.get("outputs", {})
+
+        return TTSJobStatusCompleted(
+            job_id=job_id,
+            status="completed",
+            message=job_info.get("message", "Job completed successfully."),
+            outputs=TTSJobOutputs(
+                zip_file_url=make_file_url(
+                    outputs_data.get("zip_file_local_path"),
+                    job_id,
+                ),
+                merged_mp3_url=make_file_url(
+                    outputs_data.get("merged_mp3_local_path"),
+                    job_id,
+                ),
+            ),
+        )
+    if status == "failed":
+        return TTSJobStatusFailed(
+            job_id=job_id,
+            status="failed",
+            error_message=job_info.get("error_message", "Unknown error."),
+        )
+    # pending or processing
+    return TTSJobStatusPending(
+        job_id=job_id,
+        status=job_info.get("status", "pending"),
+    )
+
+
+# Static file serving
+
+job_output_dir_static = os.getenv("APP_JOB_OUTPUT_DIR", ".job_outputs")
+os.makedirs(job_output_dir_static, exist_ok=True)
+app.mount("/job_files", StaticFiles(directory=job_output_dir_static), name="job_files")
 
 
 # --- Main Blocks UI Definition ---

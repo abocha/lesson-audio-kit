@@ -8,11 +8,6 @@ from typing import Any, Literal, Optional, cast
 
 import gradio as gr
 from openai import AsyncOpenAI
-from ui_layout import (
-    APP_AVAILABLE_VOICES,
-    DEFAULT_VIBE,
-    PREDEFINED_VIBES,
-)
 
 from dialogue_tts_core.audio_utils import (
     merge_mp3_files,  # noqa: F401 - merge_mp3_files might be used by orchestrator or implicitly
@@ -27,6 +22,12 @@ from dialogue_tts_core.dialogue_script_parser import (
     # as per pseudocode it should take parsed_lines
 )
 from dialogue_tts_core.tts_orchestrator import orchestrate_tts_synthesis
+
+from .ui_layout import (
+    APP_AVAILABLE_VOICES,
+    DEFAULT_VIBE,
+    PREDEFINED_VIBES,
+)
 
 # Explicitly define the Literal type for OpenAI voices for robust casting
 OpenAIVoiceLiteralType = Literal[
