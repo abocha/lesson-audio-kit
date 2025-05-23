@@ -276,12 +276,16 @@ def _calculate_effective_cost_per_mchar(
 
 
 # --- Router Logic ---
+LATENCY_THRESHOLD_MS: Final[int] = 350
+
+
 def select_engine(  # noqa: C901
     char_len: int,
     desired_quality: QualityTier = QualityTier.MID,
     max_cost_usd_for_job: float | None = None,
     prefer_low_latency: bool = False,
     prefer_emotion_support: bool = False,
+    prefer_voice_cloning: bool = False,
     user_id: str | None = None,
 ) -> EngineMeta:
     """
@@ -304,6 +308,20 @@ def select_engine(  # noqa: C901
                 "with emotion support. Considering all prior candidates."
             )
 
+    if prefer_voice_cloning:
+        voice_cloning_candidates = [
+            engine
+            for engine in feature_preferred_candidates
+            if engine.supports_voice_cloning
+        ]
+        if voice_cloning_candidates:
+            feature_preferred_candidates = voice_cloning_candidates
+        else:
+            print(
+                "Warning: prefer_voice_cloning=True, but no engines found "
+                "with voice cloning support. Considering all prior candidates."
+            )
+
     candidate_engines: list[EngineMeta] = feature_preferred_candidates
 
     candidate_engines = [
@@ -316,19 +334,18 @@ def select_engine(  # noqa: C901
             f"No engines match features AND desired quality: {desired_quality.name}"
         )
 
-    latency_threshold_ms = 350
     if prefer_low_latency:
         low_latency_candidates = [
             engine
             for engine in candidate_engines
-            if engine.latency_ms <= latency_threshold_ms
+            if engine.latency_ms <= LATENCY_THRESHOLD_MS
         ]
         if low_latency_candidates:
             candidate_engines = low_latency_candidates
         else:
             print(
                 f"Warning: prefer_low_latency=True, but no engines met the "
-                f"{latency_threshold_ms}ms threshold. Considering current candidates."
+                f"{LATENCY_THRESHOLD_MS}ms threshold. Considering current candidates."
             )
 
     if not candidate_engines:

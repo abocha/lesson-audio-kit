@@ -1,7 +1,7 @@
 import asyncio
 import os
 import shutil  # Added for cache hit copy
-from typing import Any
+from typing import Any, Optional
 import urllib.parse  # For URL encoding text in NSFW check
 
 import httpx  # For NSFW check
@@ -108,7 +108,7 @@ async def synthesize_speech_line(  # noqa: C901
     instructions: str | None = None,  # For models like gpt-4o-mini-tts potentially
     nsfw_api_url_template: str | None = None,
     line_index: int = -1,  # For logging purposes
-) -> tuple[str | None, bool]:
+) -> tuple[Optional[str], bool]:
     """
     Synthesizes a single line of text to speech using OpenAI TTS.
     Handles rate limiting with exponential backoff and NSFW checks.

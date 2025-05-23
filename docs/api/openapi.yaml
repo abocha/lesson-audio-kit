@@ -296,7 +296,44 @@ components:
           oneOf:
             - $ref: '#/components/schemas/NSFWCheckOptions'
             - type: "null"
-      description: Payload for TTS synthesis request.
+        user_id:
+          type: string
+          nullable: true
+          description: An optional identifier for the user making the request, used for free tier calculations.
+          default: null
+        desired_quality_tier:
+          type: string
+          nullable: true
+          description: "Desired quality tier for TTS. Defaults to MID. Options: LOW, MID, HIGH, ULTRA."
+          default: "MID"
+          enum: ["LOW", "MID", "HIGH", "ULTRA"]
+        max_total_job_cost_usd:
+          type: number
+          format: float
+          nullable: true
+          description: Optional maximum total cost in USD for the entire TTS job.
+          default: null
+        prefer_low_latency:
+          type: boolean
+          nullable: true
+          description: Optional preference for lower latency engines.
+          default: false
+        prefer_emotion_support:
+          type: boolean
+          nullable: true
+          description: Optional preference for engines supporting emotion.
+          default: false
+        prefer_voice_cloning:
+          type: boolean
+          nullable: true
+          description: Optional preference for engines supporting voice cloning.
+          default: false
+        specific_engine_id:
+          type: string
+          nullable: true
+          description: Optional specific engine ID to use, bypassing the cost router logic.
+          default: null
+        description: Payload for TTS synthesis request.
 
     TTSJobCreationResponse:
       type: object

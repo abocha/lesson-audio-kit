@@ -4,6 +4,7 @@ from typing import Any, Final, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
+from dialogue_tts_core.cost_router import QualityTier
 from dialogue_tts_core.tts_client import OPENAI_VOICES
 from gradio_frontend.ui_layout import VIBE_CHOICES
 
@@ -182,6 +183,38 @@ class TTSRequestPayload(BaseModel):
     nsfw_check_options: Optional[NSFWCheckOptions] = Field(
         default=None,  # Changed from default_factory
         description="Options for NSFW content checking.",
+    )
+    user_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "An optional identifier for the user making the request, "
+            "used for free tier calculations."
+        ),
+    )
+    desired_quality_tier: Optional[str] = Field(
+        default=QualityTier.MID.name,
+        description="Desired quality tier for TTS. Defaults to MID. "
+        "Options: LOW, MID, HIGH, ULTRA.",
+    )
+    max_total_job_cost_usd: Optional[float] = Field(
+        default=None,
+        description="Optional maximum total cost in USD for the entire TTS job.",
+    )
+    prefer_low_latency: Optional[bool] = Field(
+        default=False, description="Optional preference for lower latency engines."
+    )
+    prefer_emotion_support: Optional[bool] = Field(
+        default=False, description="Optional preference for engines supporting emotion."
+    )
+    prefer_voice_cloning: Optional[bool] = Field(
+        default=False,
+        description="Optional preference for engines supporting voice cloning.",
+    )
+    specific_engine_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional specific engine ID to use, bypassing the cost router logic."
+        ),
     )
 
     @field_validator("global_speaker_config", mode="before")

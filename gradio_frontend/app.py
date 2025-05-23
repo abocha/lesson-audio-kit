@@ -27,7 +27,6 @@ from dialogue_tts_core.config_models import (
     TTSJobStatusResponse,
     TTSRequestPayload,
 )
-from dialogue_tts_core.cost_router import QualityTier
 from dialogue_tts_core.dialogue_script_parser import parse_dialogue_script
 from dialogue_tts_core.speaker_config_resolver import (
     get_unique_speakers_from_parsed_script,
@@ -134,59 +133,70 @@ async def get_cache_statistics_endpoint() -> "CacheStatsResponse":
 # --- Helper function to run the orchestration in background ---
 async def run_tts_orchestration_task(
     job_id: str,
-    parsed_script: list[dict],
+    dialogue_lines: list[dict],
     global_pause_ms: int,
-    resolved_configs: dict[str, SpeakerTTSConfig],
-    output_base_dir: str,
-    cache_base_dir: str,
-    nsfw_template: Optional[str],
+    output_dir: str,
+    user_id: Optional[str],
+    desired_quality_tier_str: Optional[str],
+    max_total_job_cost_usd: Optional[float],
+    prefer_low_latency: Optional[bool],
+    prefer_emotion_support: Optional[bool],
+    prefer_voice_cloning: Optional[bool],
+    specific_engine_id: Optional[str],
+    tts_client: Any,  # This will be async_openai_client
+    cache_base_dir: str,  # This will be cache_base_dir
+    resolved_speaker_configs_map: dict[
+        str, SpeakerTTSConfig
+    ],  # This will be resolved_configs
+    nsfw_api_url_template: Optional[str],  # This will be nsfw_template
 ) -> tuple[str | None, str | None, str, list[dict[str, Any]]]:
-    global job_store, async_openai_client
-    if async_openai_client is None:
+    global job_store
+    if tts_client is None:
         job_store[job_id].update(
-            {"status": "failed", "error_message": "OpenAI client not initialized."}
+            {"status": "failed", "error_message": "TTS client not initialized."}
         )
         return None, None, "failed", []
 
     job_store[job_id]["status"] = "processing"
     try:
         (
-            zip_path,
-            merged_path,
-            status_msg,
-            all_lines_details,  # Changed from all_lines_synthesis_details
+            result_audio_path,
+            zip_file_path,
+            status_message,
+            all_lines_details,
         ) = await orchestrate_tts_synthesis(
-            parsed_script=parsed_script,
-            # tts_global_model=tts_global_model, # REMOVED
+            parsed_script=dialogue_lines,
             global_pause_ms=global_pause_ms,
-            resolved_speaker_configs_map=resolved_configs,
-            # --- New routing parameters (using placeholders/defaults for now) ---
-            user_id=None,
-            desired_quality_tier=QualityTier.MID,
-            # ADDED - Ensure QualityTier is available
-            max_total_job_cost_usd=None,  # ADDED
-            prefer_low_latency_routing=False,  # ADDED
-            prefer_emotion_support_routing=False,  # ADDED
-            # ---
-            openai_client=async_openai_client,
-            output_directory=output_base_dir,
+            resolved_speaker_configs_map=resolved_speaker_configs_map,
+            openai_client=tts_client,
+            output_directory=output_dir,
             cache_base_dir=cache_base_dir,
-            nsfw_api_url_template=nsfw_template,
+            user_id=user_id,
+            desired_quality_tier_str=desired_quality_tier_str,
+            max_total_job_cost_usd=max_total_job_cost_usd,
+            prefer_low_latency=prefer_low_latency or False,
+            prefer_emotion_support=prefer_emotion_support or False,
+            prefer_voice_cloning=prefer_voice_cloning or False,
+            specific_engine_id=specific_engine_id,
+            nsfw_api_url_template=nsfw_api_url_template,
         )
-        # Store all_lines_synthesis_details in job_store
-        job_store[job_id]["synthesis_details"] = all_lines_details  # ADDED
+        job_store[job_id]["synthesis_details"] = all_lines_details
 
         job_store[job_id].update(
             {
                 "status": "completed",
-                "message": status_msg,
+                "message": status_message,
                 "outputs": {
-                    "zip_file_local_path": str(zip_path) if zip_path else None,
-                    "merged_mp3_local_path": str(merged_path) if merged_path else None,
+                    "zip_file_local_path": (
+                        str(zip_file_path) if zip_file_path else None
+                    ),
+                    "merged_mp3_local_path": (
+                        str(result_audio_path) if result_audio_path else None
+                    ),
                 },
             }
         )
-        return zip_path, merged_path, status_msg, all_lines_details
+        return result_audio_path, zip_file_path, status_message, all_lines_details
     except Exception as e:  # noqa: BLE001
         print(f"Error in TTS orchestration task for job {job_id}: {e!s}")
         job_store[job_id].update(
@@ -210,13 +220,17 @@ async def submit_tts_job_endpoint(
         )
 
     try:
+        # Use payload.script_text for parsing,
+        # as dialogue_script_lines is not directly in payload
         parsed_script_lines, _ = parse_dialogue_script(payload.script_text)
         if not parsed_script_lines:
             raise HTTPException(
                 status_code=400,
                 detail="Script is empty or contains no processable lines.",
             )
-    except ValueError as e:
+    except (
+        ValueError
+    ) as e:  # Changed from AttributeError to ValueError for parse_dialogue_script
         raise HTTPException(
             status_code=422, detail=f"Script parsing error: {e!s}"
         ) from e
@@ -256,15 +270,24 @@ async def submit_tts_job_endpoint(
 
     job_store[job_id] = {"status": "pending", "request_payload": payload.model_dump()}
 
+    # Pass the actual clients and managers to the background task
     background_tasks.add_task(
         run_tts_orchestration_task,
         job_id,
         parsed_script_lines,
         effective_pause_ms,
-        resolved_configs,
         job_output_base_dir,
-        cache_base_dir,
-        nsfw_template,
+        payload.user_id,
+        payload.desired_quality_tier,
+        payload.max_total_job_cost_usd,
+        payload.prefer_low_latency,
+        payload.prefer_emotion_support,
+        payload.prefer_voice_cloning,
+        payload.specific_engine_id,
+        async_openai_client,  # Pass the actual OpenAI client
+        cache_base_dir,  # Pass cache_base_dir
+        resolved_configs,  # Pass resolved_configs
+        nsfw_template,  # Pass nsfw_template
     )
 
     status_url = f"/api/tts/status/{job_id}"

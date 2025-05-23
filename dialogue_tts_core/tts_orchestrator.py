@@ -3,6 +3,7 @@
 import contextlib
 import datetime  # Added import
 from datetime import timezone  # Added for timezone-aware datetime
+import logging  # Added for logging
 import os
 import shutil
 from typing import Any, Optional
@@ -17,8 +18,16 @@ from .audio_utils import merge_mp3_files
 
 # Assuming SpeakerTTSConfig is in dialogue_tts_core.config_models
 from .config_models import SpeakerTTSConfig
-from .cost_router import EngineMeta, QualityTier, select_engine
+from .cost_router import (
+    ENGINE_TABLE,
+    EngineMeta,
+    QualityTier,
+    _calculate_effective_cost_per_mchar,
+    select_engine,
+)
 from .tts_client import synthesize_speech_line
+
+logger = logging.getLogger(__name__)
 
 # Note: The logic for _resolve_instructions_for_line is simplified here.
 # It's assumed that SpeakerTTSConfig.custom_instructions will contain the final,
@@ -50,10 +59,12 @@ async def _synthesize_and_log_line(  # noqa: C901
     line_data: dict,
     speaker_specific_config: SpeakerTTSConfig,
     user_id: Optional[str],
-    desired_quality_tier: QualityTier,
-    max_line_cost_usd: Optional[float],
-    prefer_low_latency_routing: bool,
-    prefer_emotion_support_routing: bool,
+    desired_quality_tier_str: Optional[str],
+    max_total_job_cost_usd: Optional[float],
+    prefer_low_latency: bool,
+    prefer_emotion_support: bool,
+    prefer_voice_cloning: bool,
+    specific_engine_id: Optional[str],
     openai_client: AsyncOpenAI,
     current_job_output_path: str,
     cache_base_dir: str,
@@ -75,9 +86,10 @@ async def _synthesize_and_log_line(  # noqa: C901
         "error": None,
         "path": None,
         "cache_status": "unknown",
-        "engine_provider": None,
-        "engine_model_id": None,
-        "actual_line_cost_usd": None,  # Placeholder for now
+        "selected_engine_id": None,
+        "selected_engine_provider": None,
+        "selected_engine_quality_tier": None,
+        "effective_cost_for_line_usd": None,
     }
     synthesis_details_list.append(line_detail_entry)  # Add entry immediately
 
@@ -85,22 +97,76 @@ async def _synthesize_and_log_line(  # noqa: C901
         line_detail_entry.update({"status": "skipped", "error": "Empty text line"})
         return None
 
+    selected_engine: Optional[EngineMeta] = None
     try:
-        selected_engine: EngineMeta = select_engine(
-            char_len=char_len,
-            desired_quality=desired_quality_tier,
-            max_cost_usd_for_job=max_line_cost_usd,
-            prefer_low_latency=prefer_low_latency_routing,
-            prefer_emotion_support=prefer_emotion_support_routing,
-            user_id=user_id,
+        desired_quality = QualityTier.MID
+        if desired_quality_tier_str:
+            try:
+                desired_quality = QualityTier(desired_quality_tier_str)
+            except ValueError:
+                logger.warning(
+                    "Invalid desired_quality_tier_str: %s. Defaulting to MID.",
+                    desired_quality_tier_str,
+                )
+                desired_quality = QualityTier.MID
+
+        if specific_engine_id:
+            selected_engine = ENGINE_TABLE.get(specific_engine_id)
+            if not selected_engine:
+                logger.error(
+                    "Specific engine ID '%s' not found in ENGINE_TABLE. "
+                    "Falling back to dynamic selection.",
+                    specific_engine_id,
+                )
+
+        if (
+            not selected_engine
+        ):  # Fallback if specific_engine_id not provided or not found
+            selected_engine = select_engine(
+                char_len=char_len,
+                desired_quality=desired_quality,
+                max_cost_usd_for_job=max_total_job_cost_usd,
+                user_id=user_id,
+                prefer_low_latency=prefer_low_latency,
+                prefer_emotion_support=prefer_emotion_support,
+                prefer_voice_cloning=prefer_voice_cloning,
+            )
+
+        if not selected_engine:
+            raise RuntimeError("No suitable TTS engine could be selected.")
+
+        line_detail_entry["selected_engine_id"] = (
+            selected_engine.model_id
+        )  # Use model_id as engine_id
+        line_detail_entry["selected_engine_provider"] = selected_engine.provider
+        line_detail_entry["selected_engine_quality_tier"] = (
+            selected_engine.quality_tier.value
         )
-        line_detail_entry["engine_provider"] = selected_engine.provider
-        line_detail_entry["engine_model_id"] = selected_engine.model_id
+
+        # Calculate effective cost for the line
+        effective_cost = _calculate_effective_cost_per_mchar(
+            selected_engine,
+            char_len,  # Pass selected_engine object directly
+        )
+        line_detail_entry["effective_cost_for_line_usd"] = (
+            effective_cost / 1000
+        ) * char_len
+
+        logger.info(
+            "Selected engine for line ID '%s': %s "
+            "(Provider: %s, Model: %s, Quality: %s)",
+            line_id,
+            selected_engine.model_id,
+            selected_engine.provider,
+            selected_engine.model_id,
+            selected_engine.quality_tier.value,
+        )
+
     except RuntimeError as e:
         line_detail_entry.update(
             {"status": "failed", "error": f"Engine selection failed: {e}"}
         )
-        print(f"Error selecting engine for line ID '{line_id}': {e}")
+        logger.error("Error selecting engine for line ID '%s': %s", line_id, e)
         return None
 
     line_voice = speaker_specific_config.voice
@@ -120,9 +186,10 @@ async def _synthesize_and_log_line(  # noqa: C901
         line_instructions = speaker_specific_config.custom_instructions
 
     # Provider Dispatch (Conceptual for now)
+    # This part might need to be expanded if other providers are added
     if selected_engine.provider != "openai":
         error_msg = f"Unsupported TTS provider: {selected_engine.provider}"
-        print(error_msg)
+        logger.error(error_msg)
         line_detail_entry.update({"status": "failed", "error": error_msg})
         return None
 
@@ -148,7 +215,7 @@ async def _synthesize_and_log_line(  # noqa: C901
             text=text_to_synthesize,
             voice=line_voice,
             output_path=line_output_filename,
-            model=tts_model_for_client,
+            model=tts_model_for_client,  # Corrected parameter name
             speed=line_speed,
             instructions=line_instructions,
             cache_base_dir=cache_base_dir,
@@ -181,7 +248,7 @@ async def _synthesize_and_log_line(  # noqa: C901
         line_detail_entry.update(
             {"status": "failed", "error": f"Synthesis exception: {e}"}
         )
-        print(f"Error during synthesis for line ID '{line_id}': {e}")
+        logger.error("Error during synthesis for line ID '%s': %s", line_id, e)
     return synthesized_path
 
 
@@ -257,8 +324,8 @@ def _compile_status_message(all_lines_synthesis_details: list[dict[str, Any]]) -
     engine_usage: dict[str, int] = {}
     for d in all_lines_synthesis_details:
         if d.get("status") == "success":
-            provider = d.get("engine_provider", "unknown")
-            model_id = d.get("engine_model_id", "unknown")
+            provider = d.get("selected_engine_provider", "unknown")
+            model_id = d.get("selected_engine_id", "unknown")  # Use selected_engine_id
             engine_key = f"{provider} {model_id}"
             engine_usage[engine_key] = engine_usage.get(engine_key, 0) + 1
 
@@ -282,14 +349,16 @@ async def orchestrate_tts_synthesis(
     parsed_script: list[dict],
     global_pause_ms: int,
     resolved_speaker_configs_map: dict[str, SpeakerTTSConfig],
-    user_id: Optional[str],
-    desired_quality_tier: QualityTier,
-    max_total_job_cost_usd: Optional[float],
-    prefer_low_latency_routing: bool,
-    prefer_emotion_support_routing: bool,
-    openai_client: AsyncOpenAI,
+    openai_client: AsyncOpenAI,  # Moved non-default arguments first
     output_directory: str,
     cache_base_dir: str,
+    user_id: Optional[str] = None,
+    desired_quality_tier_str: Optional[str] = QualityTier.MID.name,  # Changed to .name
+    max_total_job_cost_usd: Optional[float] = None,
+    prefer_low_latency: bool = False,
+    prefer_emotion_support: bool = False,
+    prefer_voice_cloning: bool = False,
+    specific_engine_id: Optional[str] = None,
     nsfw_api_url_template: Optional[str] = None,
 ) -> tuple[Optional[str], Optional[str], str, list[dict[str, Any]]]:
     if not parsed_script:
@@ -308,9 +377,9 @@ async def orchestrate_tts_synthesis(
     synthesized_line_files: list[str] = []
     all_lines_synthesis_details: list[dict[str, Any]] = []
 
-    max_line_cost_usd: Optional[float] = None
-    if max_total_job_cost_usd is not None and len(parsed_script) > 0:
-        max_line_cost_usd = max_total_job_cost_usd / len(parsed_script)
+    # max_line_cost_usd: Optional[float] = None # Removed as per instructions
+    # if max_total_job_cost_usd is not None and len(parsed_script) > 0:
+    #     max_line_cost_usd = max_total_job_cost_usd / len(parsed_script)
 
     for line_data in parsed_script:
         speaker_name = line_data.get("speaker", "UnknownSpeaker")
@@ -336,10 +405,12 @@ async def orchestrate_tts_synthesis(
             line_data=line_data,
             speaker_specific_config=speaker_specific_config,
             user_id=user_id,
-            desired_quality_tier=desired_quality_tier,
-            max_line_cost_usd=max_line_cost_usd,
-            prefer_low_latency_routing=prefer_low_latency_routing,
-            prefer_emotion_support_routing=prefer_emotion_support_routing,
+            desired_quality_tier_str=desired_quality_tier_str,
+            max_total_job_cost_usd=max_total_job_cost_usd,
+            prefer_low_latency=prefer_low_latency,
+            prefer_emotion_support=prefer_emotion_support,
+            prefer_voice_cloning=prefer_voice_cloning,
+            specific_engine_id=specific_engine_id,
             openai_client=openai_client,
             current_job_output_path=current_job_output_path,
             cache_base_dir=cache_base_dir,
