@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 from dialogue_tts_core.config_models import (
+    QualityTier,
     SpeakerTTSConfig,
     TTSJobStatusCompleted,
     TTSJobStatusFailed,
@@ -111,7 +112,8 @@ def test_submit_tts_job_valid_payload(
 
 
 def test_submit_tts_job_with_routing_parameters_full(
-    _mock_core_services: Any, mock_background_tasks: MagicMock
+    mock_core_services: Any,  # noqa: ARG001
+    mock_background_tasks: MagicMock,
 ) -> None:
     """Test TTS job submission with all routing parameters."""
     payload_with_routing = TTSRequestPayload(
@@ -120,7 +122,7 @@ def test_submit_tts_job_with_routing_parameters_full(
         speaker_config_method="global",
         global_speaker_config=SpeakerTTSConfig(voice="alloy"),
         user_id="test_user_123",
-        desired_quality_tier="premium",
+        desired_quality_tier="HIGH",
         max_total_job_cost_usd=0.5,
         prefer_low_latency=True,
         prefer_emotion_support=True,
@@ -135,7 +137,7 @@ def test_submit_tts_job_with_routing_parameters_full(
 
     mock_background_tasks.assert_called_once()
     called_args, called_kwargs = mock_background_tasks.call_args
-    assert called_args[0][0] == run_tts_orchestration_task
+    assert called_args[0] == run_tts_orchestration_task
     assert called_kwargs.get("user_id") == payload_with_routing.user_id
     assert (
         called_kwargs.get("desired_quality_tier_str")
@@ -164,7 +166,8 @@ def test_submit_tts_job_with_routing_parameters_full(
 
 
 def test_submit_tts_job_with_routing_parameters_partial(
-    _mock_core_services: Any, mock_background_tasks: MagicMock
+    mock_core_services: Any,  # noqa: ARG001
+    mock_background_tasks: MagicMock,
 ) -> None:
     """Test TTS job submission with a subset of routing parameters."""
     payload_with_routing = TTSRequestPayload(
@@ -184,9 +187,9 @@ def test_submit_tts_job_with_routing_parameters_partial(
 
     mock_background_tasks.assert_called_once()
     called_args, called_kwargs = mock_background_tasks.call_args
-    assert called_args[0][0] == run_tts_orchestration_task
+    assert called_args[0] == run_tts_orchestration_task
     assert called_kwargs.get("user_id") == payload_with_routing.user_id
-    assert called_kwargs.get("desired_quality_tier_str") is None  # Not provided
+    assert called_kwargs.get("desired_quality_tier_str") == QualityTier.MID.name
     assert called_kwargs.get("max_total_job_cost_usd") is None  # Not provided
     assert (
         called_kwargs.get("prefer_low_latency")
@@ -201,7 +204,8 @@ def test_submit_tts_job_with_routing_parameters_partial(
 
 
 def test_submit_tts_job_with_routing_parameters_defaults(
-    _mock_core_services: Any, mock_background_tasks: MagicMock
+    mock_core_services: Any,  # noqa: ARG001
+    mock_background_tasks: MagicMock,
 ) -> None:
     """Test TTS job submission with routing parameters relying on defaults."""
     payload_with_routing = TTSRequestPayload(
@@ -219,9 +223,9 @@ def test_submit_tts_job_with_routing_parameters_defaults(
 
     mock_background_tasks.assert_called_once()
     called_args, called_kwargs = mock_background_tasks.call_args
-    assert called_args[0][0] == run_tts_orchestration_task
+    assert called_args[0] == run_tts_orchestration_task
     assert called_kwargs.get("user_id") is None
-    assert called_kwargs.get("desired_quality_tier_str") is None
+    assert called_kwargs.get("desired_quality_tier_str") == QualityTier.MID.name
     assert called_kwargs.get("max_total_job_cost_usd") is None
     assert called_kwargs.get("prefer_low_latency") is False
     assert called_kwargs.get("prefer_emotion_support") is False
