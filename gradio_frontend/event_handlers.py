@@ -103,7 +103,7 @@ async def handle_script_processing(  # noqa: C901
     global_speed: float,  # UI global speed
     global_instructions: str,  # UI global instructions
     progress: Optional[gr.Progress] = None,
-) -> tuple[str | None, str | None, str, Any]:
+) -> tuple[str | None, str | None, str, list[dict[str, Any]]]:
     if progress is None:
         progress = gr.Progress(track_tqdm=True)
 
@@ -111,9 +111,9 @@ async def handle_script_processing(  # noqa: C901
 
     # 1. Initial Validations
     if not openai_api_key or not async_openai_client:
-        return None, None, "Error: OpenAI API Key or client is not configured.", None
+        return None, None, "Error: OpenAI API Key or client is not configured.", []
     if not dialogue_script or not dialogue_script.strip():
-        return None, None, "Error: Script is empty.", None
+        return None, None, "Error: Script is empty.", []
 
     # 2. Prepare a base output directory for the orchestrator
     base_temp_output_dir = tempfile.mkdtemp(prefix="gradio_tts_job_base_")
@@ -123,10 +123,10 @@ async def handle_script_processing(  # noqa: C901
         parsed_lines, _total_chars = parse_dialogue_script(dialogue_script)
         if not parsed_lines:
             shutil.rmtree(base_temp_output_dir)
-            return None, None, "Error: No valid lines found in script.", None
+            return None, None, "Error: No valid lines found in script.", []
     except ValueError as e:
         shutil.rmtree(base_temp_output_dir)
-        return None, None, f"Script parsing error: {e!s}", None
+        return None, None, f"Script parsing error: {e!s}", []
 
     progress(0.1, desc="Script parsed. Resolving speaker configurations...")
 
@@ -269,7 +269,7 @@ async def handle_script_processing(  # noqa: C901
             None,
             None,
             f"Error: Unknown speaker configuration method '{speaker_config_method}'.",
-            None,
+            [],
         )
 
     # Ensure all speakers in the script have a configuration, even if it's the default
@@ -292,16 +292,21 @@ async def handle_script_processing(  # noqa: C901
         synthesis_details,  # MODIFIED to receive the new detailed list
     ) = await orchestrate_tts_synthesis(
         parsed_script=parsed_lines,
-        # tts_global_model=tts_model, # REMOVED
         global_pause_ms=pause_ms,
         resolved_speaker_configs_map=resolved_configs,
-        # --- New routing parameters (using placeholders/defaults for now) ---
-        user_id=None,  # ADDED
-        desired_quality_tier=QualityTier.MID,  # ADDED - Ensure QualityTier is available
-        max_total_job_cost_usd=None,  # ADDED
-        prefer_low_latency_routing=False,  # ADDED
-        prefer_emotion_support_routing=False,  # ADDED
-        # ---
+        # --- Routing Parameters (Defaults for Gradio UI) ---
+        user_id=None,  # Gradio UI doesn't have user_id input yet
+        # Default for Gradio, pass as string
+        desired_quality_tier_str=QualityTier.MID.name,
+        max_total_job_cost_usd=None,  # Gradio UI doesn't have this
+        prefer_low_latency_routing=False,  # Gradio UI doesn't have this
+        prefer_emotion_support_routing=False,  # Gradio UI doesn't have this
+        prefer_voice_cloning_routing=False,  # Gradio UI doesn't have this
+        # Gradio UI uses tts_model as the only engine choice for now
+        specific_engine_id=None,
+        # This might need adjustment if tts_model from UI should map here.
+        # For now, None is fine as per instructions.
+        # --- Clients & Dirs ---
         openai_client=async_openai_client,
         output_directory=base_temp_output_dir,
         cache_base_dir=os.getenv("APP_CACHE_BASE_DIR", ".cache/tts_cache"),
