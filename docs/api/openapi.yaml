@@ -31,7 +31,7 @@ paths:
               $ref: '#/components/schemas/TTSRequestPayload'
             examples:
               globalConfigExample:
-                summary: Using global speaker configuration
+                summary: Using global config with routing preference
                 value:
                   script_text: "[Alice] Hello world.\n[Bob] Hi there."
                   tts_global_model: "tts-1-hd"
@@ -40,6 +40,10 @@ paths:
                   global_speaker_config:
                     voice: "alloy"
                     speed: 1.0
+                  # New routing params
+                  user_id: "test_user_1"
+                  desired_quality_tier: "HIGH"
+                  prefer_low_latency: true
               perSpeakerConfigExample:
                 summary: Using per-speaker configurations
                 value:
@@ -53,11 +57,14 @@ paths:
                     - speaker_name: "Alice"
                       config:
                         voice: "nova"
-                        vibe: "Friendly"
+                        vibe: "Serious" # Changed to reflect potential need for emotion support
                     - speaker_name: "Bob"
                       config:
                         voice: "shimmer"
                         custom_instructions: "Speak with a slightly higher pitch."
+                  # New routing params
+                  max_total_job_cost_usd: 0.05
+                  specific_engine_id: "openai_gpt4o_mini_tts" # Force this engine
               randomPerSpeakerExample:
                 summary: Using random voice per speaker
                 value:
@@ -247,6 +254,7 @@ components:
 
     TTSRequestPayload:
       type: object
+      description: Payload for TTS synthesis request.
       required:
         - script_text
         - tts_global_model
@@ -297,43 +305,45 @@ components:
             - $ref: '#/components/schemas/NSFWCheckOptions'
             - type: "null"
         user_id:
-          type: string
-          nullable: true
-          description: An optional identifier for the user making the request, used for free tier calculations.
+          type: ["string", "null"]
+          maxLength: 256
+          description: An optional identifier for the user making the request, used for free tier calculations or user-specific routing rules.
           default: null
+          example: "user_xyz789"
         desired_quality_tier:
-          type: string
-          nullable: true
-          description: "Desired quality tier for TTS. Defaults to MID. Options: LOW, MID, HIGH, ULTRA."
+          type: ["string", "null"]
+          enum: ["LOW", "MID", "HIGH", "ULTRA", null]
           default: "MID"
-          enum: ["LOW", "MID", "HIGH", "ULTRA"]
+          description: "Desired quality tier for TTS. Defaults to MID. Options: LOW, MID, HIGH, ULTRA."
+          example: "HIGH"
         max_total_job_cost_usd:
-          type: number
+          type: ["number", "null"]
           format: float
-          nullable: true
-          description: Optional maximum total cost in USD for the entire TTS job.
+          minimum: 0
+          description: Optional maximum total cost in USD for the entire TTS job. If set, the router will try to stay within this budget.
           default: null
+          example: 0.50
         prefer_low_latency:
-          type: boolean
-          nullable: true
+          type: ["boolean", "null"]
+          default: false
           description: Optional preference for lower latency engines.
-          default: false
+          example: true
         prefer_emotion_support:
-          type: boolean
-          nullable: true
-          description: Optional preference for engines supporting emotion.
+          type: ["boolean", "null"]
           default: false
+          description: Optional preference for engines that support explicit emotion/style controls.
+          example: true
         prefer_voice_cloning:
-          type: boolean
-          nullable: true
-          description: Optional preference for engines supporting voice cloning.
+          type: ["boolean", "null"]
           default: false
+          description: Optional preference for engines supporting voice cloning features.
+          example: false
         specific_engine_id:
-          type: string
-          nullable: true
-          description: Optional specific engine ID to use, bypassing the cost router logic.
+          type: ["string", "null"]
+          maxLength: 128
+          description: Optional specific engine_id (e.g., 'openai_tts_1_hd') to use, bypassing the cost router's selection logic. The engine must exist in the ENGINE_TABLE.
           default: null
-        description: Payload for TTS synthesis request.
+          example: "openai_tts_1_hd"
 
     TTSJobCreationResponse:
       type: object

@@ -186,36 +186,72 @@ class TTSRequestPayload(BaseModel):
     )
     user_id: Optional[str] = Field(
         default=None,
+        max_length=256,
         description=(
             "An optional identifier for the user making the request, "
-            "used for free tier calculations."
+            "used for free tier "
+            "calculations or user-specific routing rules."
         ),
     )
     desired_quality_tier: Optional[str] = Field(
         default=QualityTier.MID.name,
-        description="Desired quality tier for TTS. Defaults to MID. "
-        "Options: LOW, MID, HIGH, ULTRA.",
+        description=(
+            f"Desired quality tier for TTS. Defaults to MID. Options: "
+            f"{[q.name for q in QualityTier]}."
+        ),
     )
     max_total_job_cost_usd: Optional[float] = Field(
         default=None,
-        description="Optional maximum total cost in USD for the entire TTS job.",
+        ge=0,
+        description=(
+            "Optional maximum total cost in USD for the entire TTS job. If set, the "
+            "router will try to stay within this budget."
+        ),
     )
     prefer_low_latency: Optional[bool] = Field(
-        default=False, description="Optional preference for lower latency engines."
+        default=False,
+        description=(
+            "Optional preference for lower latency engines. If true, "
+            "router prioritizes "
+            "engines below a certain latency threshold."
+        ),
     )
     prefer_emotion_support: Optional[bool] = Field(
-        default=False, description="Optional preference for engines supporting emotion."
+        default=False,
+        description=(
+            "Optional preference for engines that support "
+            "explicit emotion/style controls."
+        ),
     )
     prefer_voice_cloning: Optional[bool] = Field(
         default=False,
-        description="Optional preference for engines supporting voice cloning.",
+        description=(
+            "Optional preference for engines that support voice cloning features."
+        ),
     )
     specific_engine_id: Optional[str] = Field(
         default=None,
+        max_length=128,
         description=(
-            "Optional specific engine ID to use, bypassing the cost router logic."
+            "Optional specific engine_id (e.g., 'openai_tts_1_hd') to use, "
+            "bypassing the "
+            "cost router's selection logic. The engine must exist in the ENGINE_TABLE."
         ),
     )
+
+    @field_validator("desired_quality_tier")
+    @classmethod
+    def validate_quality_tier_name(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        try:
+            QualityTier[v.upper()]
+        except KeyError as e:
+            raise ValueError(
+                f"Invalid quality tier '{v}'. Must be one of "
+                f"{[q.name for q in QualityTier]}."
+            ) from e
+        return v.upper()
 
     @field_validator("global_speaker_config", mode="before")
     @classmethod
