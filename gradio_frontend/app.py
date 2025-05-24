@@ -256,7 +256,8 @@ async def submit_tts_job_endpoint(
     job_id = uuid.uuid4().hex
 
     job_output_base_dir = os.getenv("APP_JOB_OUTPUT_DIR", ".job_outputs")
-    os.makedirs(job_output_base_dir, exist_ok=True)
+    job_specific_output_dir = os.path.join(job_output_base_dir, job_id)
+    os.makedirs(job_specific_output_dir, exist_ok=True)
 
     cache_base_dir = os.getenv("APP_CACHE_BASE_DIR", ".cache/tts_cache")
     os.makedirs(cache_base_dir, exist_ok=True)
@@ -294,7 +295,7 @@ async def submit_tts_job_endpoint(
         job_id=job_id,
         dialogue_lines=parsed_script_lines,
         global_pause_ms=effective_pause_ms,
-        output_dir=job_output_base_dir,
+        output_dir=job_specific_output_dir,
         user_id=payload.user_id,
         desired_quality_tier_str=payload.desired_quality_tier,
         max_total_job_cost_usd=payload.max_total_job_cost_usd,
@@ -330,6 +331,8 @@ async def get_tts_job_status_endpoint(job_id: str) -> TTSJobStatusResponse:
             return f"/job_files/{job_id_for_url}/{file_name}"
         return None
 
+    synthesis_details = job_info.get("synthesis_details")
+
     if status == "completed":
         outputs_data = job_info.get("outputs", {})
 
@@ -347,12 +350,14 @@ async def get_tts_job_status_endpoint(job_id: str) -> TTSJobStatusResponse:
                     job_id,
                 ),
             ),
+            synthesis_details=synthesis_details,
         )
     if status == "failed":
         return TTSJobStatusFailed(
             job_id=job_id,
             status="failed",
             error_message=job_info.get("error_message", "Unknown error."),
+            synthesis_details=synthesis_details,
         )
     # pending or processing
     return TTSJobStatusPending(

@@ -450,6 +450,9 @@ class TTSJobStatusFailed(BaseModel):
     job_id: str = Field(description="Unique identifier for the synthesis job.")
     status: Literal["failed"] = Field(description="Current status of the job.")
     error_message: str = Field(description="Message describing the failure.")
+    synthesis_details: Optional[list[TTSSynthesisDetail]] = Field(
+        default=None, description="Details of each synthesis line item, if available."
+    )
 
 
 TTSJobStatusResponse = Union[
