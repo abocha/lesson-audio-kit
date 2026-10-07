@@ -1,111 +1,206 @@
 # Lesson Audio Kit
 
-A modular application for generating educational lesson content and converting it into audio using Text-to-Speech (TTS) technologies.
+A modular Python toolkit for turning ESL scripts into reusable lesson audio.
 
-## Project Structure
+The project separates script parsing, speaker configuration, TTS routing, caching, audio assembly, and UI concerns so the same core can support teacher-facing interfaces or an API without duplicating synthesis logic.
 
-- `dialogue_tts_core/`: Core library for parsing, TTS client interactions, and audio utilities.
-- `gradio_frontend/`: Gradio-based web interface for the application.
-- `streamlit_frontend/`: (Planned) Streamlit-based web interface.
-- `tests/`: Pytest unit and integration tests.
-- `scripts/`: Helper scripts for development and maintenance.
-- `.vscode/`: VS Code workspace settings.
-- `pyproject.toml`: Python project configuration and dependencies (Poetry).
+## What it does today
 
-## API Documentation
+- parses dialogue scripts into speaker-attributed lines;
+- resolves per-speaker TTS configuration;
+- synthesizes lines with OpenAI TTS;
+- caches generated audio to avoid paying for identical work twice;
+- estimates/records routing and per-line cost information;
+- merges line audio into lesson-ready output;
+- exposes a Gradio UI;
+- includes a FastAPI/OpenAPI surface for programmatic use;
+- tests live-provider interactions with pytest recording/cassettes.
 
-- [OpenAPI 3.1.0 Specification](docs/api/openapi.yaml)
+The routing model already describes multiple provider/quality/cost options, but the current synthesis orchestrator dispatches to **OpenAI only**. Broader provider dispatch remains future work.
+
+## Why this exists
+
+A short listening activity has a surprisingly repetitive production loop:
+
+```text
+idea / script
+    |
+    v
+speaker parsing
+    |
+    v
+voice configuration
+    |
+    v
+TTS per line
+    |
+    +--> cache hit: reuse audio
+    |
+    +--> cache miss: synthesize + store
+    v
+audio assembly
+    |
+    v
+lesson-ready output
+```
+
+The useful abstraction is not "call a TTS API". It is keeping speaker identity, cost, caching, output assembly, and provider-specific details outside the lesson-authoring workflow.
+
+## Architecture
+
+```text
+gradio_frontend/
+        |
+        v
+dialogue_tts_core/
+  dialogue_script_parser.py
+  speaker_config_resolver.py
+  cost_router.py
+  tts_orchestrator.py
+  tts_client.py
+  cache_manager.py
+  audio_utils.py
+        |
+        +--> OpenAI TTS
+        |
+        +--> local audio cache
+        v
+   assembled audio
+```
+
+The core package is intentionally UI-independent. The Gradio application is one client of that core; the repository also contains API documentation and a planned/experimental Streamlit surface.
+
+## Core modules
+
+| Module | Responsibility |
+| --- | --- |
+| `dialogue_script_parser.py` | turn scripts into structured speaker lines |
+| `config_models.py` | typed configuration models |
+| `speaker_config_resolver.py` | resolve voice/config per speaker |
+| `cost_router.py` | model TTS engines by cost, quality, latency, and capabilities |
+| `tts_orchestrator.py` | coordinate per-line synthesis and collect job details |
+| `tts_client.py` | provider-facing synthesis calls |
+| `cache_manager.py` | reusable generated-audio cache |
+| `audio_utils.py` | merge/assemble audio output |
+| `llm_client.py` | text-generation client utilities |
+
+## Routing model
+
+The router represents TTS engines using explicit metadata such as:
+
+- provider and model ID;
+- quality tier;
+- estimated latency;
+- per-character or per-minute cost;
+- emotion support;
+- voice-cloning support.
+
+That makes routing decisions inspectable and keeps cost policy out of the UI.
+
+Current caveat: the engine catalog contains metadata for OpenAI, Fal.ai, ElevenLabs, Cartesia, and other candidates, but the production dispatch path in `tts_orchestrator.py` currently supports OpenAI synthesis only.
+
+## Stack
+
+- Python 3.13
+- OpenAI Python SDK
+- Gradio
+- FastAPI + Uvicorn
+- pydub
+- Poetry
+- pytest + pytest-recording
+- Ruff
+- GitHub Actions
 
 ## Setup
 
-1. **Clone the repository:**
+Requirements:
 
-    ```bash
-    git clone <repository-url>
-    cd lesson-audio-kit
-    ```
+- Python 3.13
+- Poetry
+- FFmpeg available to pydub where required
 
-2. **Install Python and Poetry:**
-    Ensure you have Python (e.g., 3.11+) and Poetry installed.
+Clone the repository and install dependencies:
 
-3. **Create and configure environment variables:**
-    Copy `.env.example` to `.env` and fill in your API keys and other configurations:
+```bash
+git clone https://github.com/abocha/lesson-audio-kit.git
+cd lesson-audio-kit
+poetry install
+```
 
-    ```bash
-    cp .env.example .env
-    # Edit .env with your actual secrets
-    ```
+Create a local environment file:
 
-    *At a minimum, `OPENAI_API_KEY` is required for the Gradio app to function.*
+```bash
+cp .env.example .env
+```
 
-4. **Install dependencies using Poetry:**
+On PowerShell:
 
-    ```bash
-    poetry install
-    ```
+```powershell
+Copy-Item .env.example .env
+```
 
-## Running the Gradio Application
+At minimum, set:
 
-1. Activate the Poetry environment:
+```text
+OPENAI_API_KEY=...
+```
 
-    ```bash
-    poetry shell
-    ```
+Optional settings in `.env.example` cover other provider keys, cache/output paths, and experimental integrations.
 
-2. Navigate to the Gradio frontend directory and run the app:
+## Run the Gradio app
 
-    ```bash
-    cd gradio_frontend
-    python app.py
-    ```
+```bash
+poetry run python gradio_frontend/app.py
+```
 
-    The application should now run successfully if `OPENAI_API_KEY` is set in your `.env` file (which is loaded by `python-dotenv` in `app.py`).
+The app loads configuration from the local environment and uses the shared core package for parsing and synthesis.
 
 ## Development
 
-- **Linting and Formatting:** This project uses Ruff for linting and Black for formatting. VS Code is configured to format on save.
-- **Testing:** Run tests using Pytest:
+Run tests:
 
-  ```bash
-  poetry shell
-  pytest
-  ```
+```bash
+poetry run pytest
+```
 
-### Live API Testing (VCR Cassette Recording)
+Run lint and formatting checks:
 
-Tests that interact with the live OpenAI API (e.g., for recording VCR cassettes) are marked with `@pytest.mark.live`.
+```bash
+poetry run ruff check .
+poetry run ruff format --check .
+```
 
-To run these tests in CI in a way that records new cassettes (e.g., on your fork if you've made changes requiring new recordings), you will need to add an `OPENAI_API_KEY` secret to your GitHub repository settings:
+The GitHub Actions workflow runs those checks plus pytest on Python 3.13 for pushes and pull requests targeting `main`, `master`, or `develop`.
 
-1. Go to your forked repository on GitHub.
-2. Navigate to `Settings` > `Secrets and variables` > `Actions`.
-3. Click `New repository secret`.
-4. Name: `OPENAI_API_KEY`
-5. Value: Your actual OpenAI API key.
+### Recorded/live API tests
 
-Without this secret, CI will use existing cassettes or skip these tests if cassettes are missing and `OPENAI_API_KEY` is not set in the environment.
+Tests that require live OpenAI access are marked with `@pytest.mark.live`.
 
-#### Running Live API Tests Locally
+The repository uses pytest recording so most development can run against existing cassettes instead of making repeated paid/network calls. Live cassette recording requires `OPENAI_API_KEY`.
 
-To run tests that hit the live OpenAI API locally (e.g., to record new VCR cassettes or debug live interactions), you can use the provided script. This script retrieves your OpenAI API key from 1Password (ensure `op` CLI is configured and you have access to the specified secret path `op://personal/openai/key`).
+A helper script is available for the author's local 1Password-based workflow:
 
-1. Make the script executable:
+```bash
+./scripts/run_tests_live.sh
+```
 
-    ```bash
-    chmod +x scripts/run_tests_live.sh
-    ```
+That script is optional; ordinary contributors can provide `OPENAI_API_KEY` through their own environment.
 
-2. Run the script from the project root:
+## API documentation
 
-    ```bash
-    ./scripts/run_tests_live.sh
-    ```
+The OpenAPI 3.1 specification is available at:
 
-This will set the `OPENAI_API_KEY` environment variable for the session and run `pytest tests/core/test_tts_client.py -m "live"`.
+[docs/api/openapi.yaml](docs/api/openapi.yaml)
 
-## TODO
+## Project status
 
-- Implement Streamlit frontend.
-- Add more TTS providers.
-- Develop LLM client for content generation.
-- Set up CI/CD pipeline.
+This repository is an active prototype/core extraction rather than a finished multi-provider product.
+
+Implemented foundations include script parsing, speaker configuration, OpenAI synthesis, caching, cost-aware engine metadata, audio assembly, UI integration, API schema, and automated tests.
+
+Likely next steps are:
+
+- implement provider dispatch beyond OpenAI;
+- reconcile the provider catalog with real runtime adapters;
+- simplify/retire older frontend experiments;
+- add a concise demo showing the script → audio workflow.
